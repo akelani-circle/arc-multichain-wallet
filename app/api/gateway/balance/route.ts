@@ -17,7 +17,12 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { fetchGatewayBalance, getUsdcBalance, CHAIN_BY_DOMAIN, type SupportedChain } from "@/lib/circle/gateway-sdk";
+import {
+  fetchGatewayBalances,
+  getUsdcBalance,
+  type GatewayBalanceEntry,
+  type SupportedChain,
+} from "@/lib/circle/gateway-sdk";
 import { createClient } from "@/lib/supabase/server";
 import type { Address } from "viem";
 
@@ -47,61 +52,41 @@ export async function POST(req: NextRequest) {
       "avalancheFuji",
     ];
 
-    // Fetch balances for all addresses
+    // Fetch Gateway balances for all addresses in one batched App Kit call
+    let gatewayByAddress = new Map<string, GatewayBalanceEntry>();
+    try {
+      const gatewayEntries = await fetchGatewayBalances(addresses as Address[]);
+      for (const entry of gatewayEntries) {
+        gatewayByAddress.set(entry.address.toLowerCase(), entry);
+      }
+    } catch (error: any) {
+      console.error("Error fetching Gateway balances:", error.message);
+      console.log("Will fetch on-chain balances only");
+    }
+
+    // Fetch on-chain USDC balances per address and merge with Gateway balances
     const balancePromises = addresses.map(async (address: string) => {
       try {
-        // Fetch Gateway balance (available balance on Gateway contracts)
-        let gatewayBalances: Array<{ domain: number; balance: number; chain: string }> = [];
-        let gatewayTotal = 0;
+        const gateway = gatewayByAddress.get(address.toLowerCase());
+        const gatewayBalances = gateway?.gatewayBalances ?? [];
+        const gatewayTotal = gateway?.gatewayTotal ?? 0;
 
-        try {
-          const gatewayResponse = await fetchGatewayBalance(address as Address);
-          console.log(`Gateway API response for ${address}:`, JSON.stringify(gatewayResponse, null, 2));
-
-          gatewayBalances = gatewayResponse.balances.map((b) => {
-            // Gateway API returns balance as decimal string (e.g., "1.000000"), not atomic units
-            const balance = parseFloat(b.balance);
-            const chainName = CHAIN_BY_DOMAIN[b.domain] || "unknown";
-
-            console.log(`Gateway balance on domain ${b.domain} (${chainName}): ${balance} USDC`);
-
-            return {
-              domain: b.domain,
-              balance,
-              chain: chainName,
-              address,
-            };
-          });
-
-          gatewayTotal = gatewayBalances.reduce((sum, b) => sum + b.balance, 0);
-          console.log(`Total Gateway balance for ${address}: ${gatewayTotal} USDC`);
-        } catch (error: any) {
-          console.error(`Error fetching Gateway balance for ${address}:`, error.message);
-          console.log(`Will fetch on-chain balances only`);
-        }
-
-        // Fetch on-chain USDC balances (wallet balances not yet deposited)
         const chainBalances = await Promise.all(
           supportedChains.map(async (chain) => {
             try {
               const balance = await getUsdcBalance(address as Address, chain);
               return {
                 chain,
-                balance: Number(balance) / 1_000_000, // Convert to USDC
+                balance: Number(balance) / 1_000_000,
                 address,
               };
             } catch (error) {
               console.error(`Error fetching on-chain balance for ${chain}:`, error);
-              return {
-                chain,
-                balance: 0,
-                address,
-              };
+              return { chain, balance: 0, address };
             }
           })
         );
 
-        // Calculate total from on-chain balances (wallet balance)
         const walletTotal = chainBalances.reduce((sum, cb) => sum + cb.balance, 0);
 
         return {
@@ -114,26 +99,15 @@ export async function POST(req: NextRequest) {
         };
       } catch (error: any) {
         console.error(`Error fetching balance for ${address}:`, error);
-        return {
-          address,
-          error: error.message,
-          totalBalance: 0,
-        };
+        return { address, error: error.message, totalBalance: 0 };
       }
     });
 
     const balances = await Promise.all(balancePromises);
 
-    // Calculate total unified balance from all addresses
-    const totalUnified = balances.reduce((sum, b) => {
-      return sum + (b.totalBalance || 0);
-    }, 0);
+    const totalUnified = balances.reduce((sum, b) => sum + (b.totalBalance || 0), 0);
 
-    return NextResponse.json({
-      success: true,
-      totalUnified,
-      balances,
-    });
+    return NextResponse.json({ success: true, totalUnified, balances });
   } catch (error: any) {
     console.error("Error fetching balances:", error);
     return NextResponse.json(

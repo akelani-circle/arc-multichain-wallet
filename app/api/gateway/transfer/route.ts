@@ -22,7 +22,6 @@ import {
   type SupportedChain,
 } from "@/lib/circle/gateway-sdk";
 import { createClient } from "@/lib/supabase/server";
-import type { Address } from "viem";
 
 export async function POST(req: NextRequest) {
   const supabase = await createClient();
@@ -71,16 +70,14 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const amountInAtomicUnits = BigInt(Math.floor(parseFloat(amount) * 1_000_000));
-
     // Custodial flow (Circle Wallet)
     const { data: wallet, error: walletError } = await supabase
       .from("wallets")
-      .select("circle_wallet_id")
+      .select("wallet_address")
       .eq("user_id", user.id)
       .single();
 
-    if (walletError || !wallet?.circle_wallet_id) {
+    if (walletError || !wallet?.wallet_address) {
       return NextResponse.json(
         { error: "No Circle wallet found for this user." },
         { status: 404 }
@@ -88,11 +85,11 @@ export async function POST(req: NextRequest) {
     }
 
     const transferResult = await transferUnifiedBalanceCircle(
-      wallet.circle_wallet_id,
-      amountInAtomicUnits,
+      wallet.wallet_address,
+      parseFloat(amount).toString(),
       sourceChain as SupportedChain,
       destinationChain as SupportedChain,
-      recipientAddress as Address | undefined
+      recipientAddress as string | undefined
     );
 
     const { burnTxHash, attestation, mintTxHash } = transferResult;

@@ -7,6 +7,8 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "@circle-fin/adapter-circle-wallets": "^1.3.2",
+    "@circle-fin/app-kit": "^1.7.0",
     "@circle-fin/circle-sdk": "^2.9.0",
     "@circle-fin/developer-controlled-wallets": "^9.2.1",
     "@circle-fin/smart-contract-platform": "^9.2.1",

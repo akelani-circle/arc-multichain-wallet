@@ -71,12 +71,10 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    const amountInAtomicUnits = BigInt(Math.floor(parsedAmount * 1_000_000));
-
     // Custodial flow (Circle Wallet)
     const { data: wallet, error: walletError } = await supabase
       .from("wallets")
-      .select("circle_wallet_id")
+      .select("wallet_address")
       .eq("user_id", user.id)
       .single();
 
@@ -88,9 +86,9 @@ export async function POST(req: NextRequest) {
     }
 
     const txHash = await initiateDepositFromCustodialWallet(
-      wallet.circle_wallet_id,
+      wallet.wallet_address,
       chain as SupportedChain,
-      amountInAtomicUnits
+      parsedAmount.toString()
     );
 
     // Store transaction in database
