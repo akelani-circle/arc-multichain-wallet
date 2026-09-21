@@ -19,7 +19,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { fetchGatewayBalance, getUsdcBalance, CHAIN_BY_DOMAIN, type SupportedChain } from "@/lib/circle/gateway-sdk";
 import { createClient } from "@/lib/supabase/server";
-import type { Address } from "viem";
+import { isAddress, type Address } from "viem";
+
+const MAX_ADDRESSES = 10;
 
 export async function POST(req: NextRequest) {
   try {
@@ -32,12 +34,41 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const { addresses } = await req.json();
+    const { addresses } = await req.json().catch(() => ({}));
 
     if (!addresses || !Array.isArray(addresses) || addresses.length === 0) {
       return NextResponse.json(
         { error: "Missing or invalid addresses array" },
         { status: 400 }
+      );
+    }
+
+    // Each address fans out into Gateway and per-chain RPC calls on the app's account, so
+    // it must be one of the caller's own wallets, and the list is bounded. Anyone could
+    // otherwise send thousands of arbitrary addresses.
+    if (
+      addresses.length > MAX_ADDRESSES ||
+      !addresses.every((a: unknown) => typeof a === "string" && isAddress(a, { strict: false }))
+    ) {
+      return NextResponse.json(
+        { error: `Provide up to ${MAX_ADDRESSES} valid wallet addresses` },
+        { status: 400 }
+      );
+    }
+
+    const { data: ownWallets } = await supabase
+      .from("wallets")
+      .select("address, wallet_address")
+      .eq("user_id", user.id);
+    const owned = new Set(
+      (ownWallets ?? []).flatMap((w) => [w.address, w.wallet_address])
+        .filter((a): a is string => typeof a === "string")
+        .map((a) => a.toLowerCase())
+    );
+    if (!addresses.every((a: string) => owned.has(a.toLowerCase()))) {
+      return NextResponse.json(
+        { error: "You can only read the balances of your own wallets" },
+        { status: 403 }
       );
     }
 

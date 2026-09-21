@@ -23,6 +23,7 @@
  */
 
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { circleDeveloperSdk } from "@/lib/circle/sdk";
 
 export interface GatewayEOAWallet {
@@ -66,7 +67,8 @@ export async function generateGatewayEOAWallet(walletSetId: string): Promise<Gat
  * Creates one multichain EOA wallet that can sign for all chains
  */
 export async function storeGatewayEOAWalletForUser(userId: string, walletSetId: string) {
-  const supabase = await createClient();
+  // Wallet rows are written only by the server (see migration 20260919120000).
+  const supabase = createAdminClient();
 
   // Create one EOA wallet in the wallet set
   const wallet = await generateGatewayEOAWallet(walletSetId);
