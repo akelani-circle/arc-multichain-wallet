@@ -26,7 +26,10 @@ import {
   CIRCLE_CHAIN_NAMES,
 } from "@/lib/circle/gateway-sdk";
 import { createClient } from "@/lib/supabase/server";
-import type { Address } from "viem";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { parseUsdcAmount } from "@/lib/usdc";
+import { toUserFacingError } from "@/lib/errors";
+import { isAddress, zeroAddress, type Address } from "viem";
 import { Transaction, Blockchain } from "@circle-fin/developer-controlled-wallets";
 import { circleDeveloperSdk } from "@/lib/circle/sdk";
 
@@ -41,7 +44,7 @@ export async function POST(req: NextRequest) {
   }
 
   const { sourceChain, destinationChain, amount, recipientAddress } =
-    await req.json();
+    await req.json().catch(() => ({}));
 
   try {
     if (!sourceChain || !destinationChain || !amount) {
@@ -73,7 +76,31 @@ export async function POST(req: NextRequest) {
     // Same-chain transfers are allowed (withdrawal from Gateway to wallet)
     // Cross-chain transfers will go through Gateway's burn/mint process
 
-    const amountInAtomicUnits = BigInt(Math.floor(parseFloat(amount) * 1_000_000));
+    // Exact base units. parseFloat let NaN and "12abc" through and drifted on decimals.
+    const parsed = parseUsdcAmount(amount);
+    if (!parsed) {
+      return NextResponse.json(
+        { error: "Amount must be a positive USDC amount with at most 6 decimal places" },
+        { status: 400 }
+      );
+    }
+    const amountInAtomicUnits = parsed.atomic;
+
+    // The recipient receives real funds on a burn/mint that cannot be undone, so a
+    // malformed or zero address must be refused before anything is burned.
+    if (
+      recipientAddress !== undefined &&
+      recipientAddress !== null &&
+      recipientAddress !== "" &&
+      (typeof recipientAddress !== "string" ||
+        !isAddress(recipientAddress, { strict: false }) ||
+        recipientAddress.toLowerCase() === zeroAddress)
+    ) {
+      return NextResponse.json(
+        { error: "recipientAddress must be a valid, non-zero address" },
+        { status: 400 }
+      );
+    }
 
     // Get the user's multichain SCA wallet
     const { data: wallets, error: walletError } = await supabase
@@ -175,13 +202,13 @@ export async function POST(req: NextRequest) {
     const attestationHash = attestation;
     const mintTxHash = mintTx.txHash;
 
-    // Store transaction in database
-    await supabase.from("transaction_history").insert([
+    // Store transaction in database. History is written by the server only.
+    await createAdminClient().from("transaction_history").insert([
       {
         user_id: user.id,
         chain: sourceChain,
         tx_type: "transfer",
-        amount: parseFloat(amount),
+        amount: parsed.value,
         tx_hash: mintTxHash,
         gateway_wallet_address: "0x0077777d7EBA4688BDeF3E311b846F25870A19B9",
         destination_chain: destinationChain,
@@ -196,7 +223,7 @@ export async function POST(req: NextRequest) {
       mintTxHash,
       sourceChain,
       destinationChain,
-      amount: parseFloat(amount),
+      amount: parsed.value,
       recipient,
     });
   } catch (error: any) {
@@ -232,14 +259,15 @@ export async function POST(req: NextRequest) {
       const {
         data: { user },
       } = await supabase.auth.getUser();
+      const failedAmount = parseUsdcAmount(amount);
 
-      if (user) {
-        await supabase.from("transaction_history").insert([
+      if (user && failedAmount) {
+        await createAdminClient().from("transaction_history").insert([
           {
             user_id: user.id,
             chain: sourceChain,
             tx_type: "transfer",
-            amount: parseFloat(amount || 0),
+            amount: failedAmount.value,
             destination_chain: destinationChain,
             status: "failed",
             reason: error.message || "Unknown error",
@@ -251,9 +279,7 @@ export async function POST(req: NextRequest) {
       console.error("Error logging failed transaction:", dbError);
     }
 
-    return NextResponse.json(
-      { error: error.message || "Internal server error" },
-      { status: 500 }
-    );
+    const { message, status } = toUserFacingError(error);
+    return NextResponse.json({ error: message }, { status });
   }
 }
