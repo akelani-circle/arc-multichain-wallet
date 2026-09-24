@@ -16,7 +16,7 @@ A sample application demonstrating how to build optimal USDC interoperability UX
 1. Clone the repository and install dependencies:
 
    ```bash
-   git clone git@github.com:circlefin/arc-multichain-wallet.git
+   git clone git@github.com:akelani-circle/arc-multichain-wallet.git
    cd arc-multichain-wallet
    npm install
    ```
@@ -48,12 +48,6 @@ A sample application demonstrating how to build optimal USDC interoperability UX
    npx supabase start
 
    # Push database migrations
-   npx supabase db push
-   ```
-   **Note:** If you prefer cloud-hosted Supabase, you can use:
-   
-   ```bash
-   npx supabase link
    npx supabase db push
    ```
 
