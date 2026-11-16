@@ -16,14 +16,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from 'next/server';
-import { handleDeposit } from '@/lib/deposit';
+import { createClient } from "@supabase/supabase-js";
 
-export async function POST(req: NextRequest) {
-  const params = await req.json();
-  const result = await handleDeposit(params);
-  if ('error' in result) {
-    return NextResponse.json({ error: result.error }, { status: 400 });
+/**
+ * Secret-key client. Bypasses row level security, so it is server-only and used only for
+ * writes no browser may make: creating wallets, and recording transaction history.
+ */
+export function createAdminClient() {
+  if (!process.env.SUPABASE_SECRET_KEY) {
+    throw new Error("SUPABASE_SECRET_KEY is not set");
   }
-  return NextResponse.json(result);
+
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SECRET_KEY,
+    { auth: { persistSession: false, autoRefreshToken: false } },
+  );
 }

@@ -22,6 +22,9 @@ import {
   type SupportedChain,
 } from "@/lib/circle/gateway-sdk";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { parseUsdcAmount } from "@/lib/usdc";
+import { toUserFacingError } from "@/lib/errors";
 
 export async function POST(req: NextRequest) {
   let requestBody: any = {};
@@ -36,7 +39,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    requestBody = await req.json();
+    requestBody = await req.json().catch(() => ({}));
     const { chain, amount } = requestBody;
 
     if (!chain || !amount) {
@@ -55,26 +58,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Convert amount to bigint (amount should be in USDC, multiply by 1_000_000)
-    const parsedAmount = parseFloat(amount);
-
-    // Validate if amount is positive
-    if (parsedAmount <= 0) {
+    // Exact base units. parseFloat let NaN and "12abc" through and drifted on decimals.
+    const parsed = parseUsdcAmount(amount);
+    if (!parsed) {
       return NextResponse.json(
-        { error: "Amount must be greater than 0" },
+        { error: "Amount must be a positive USDC amount with at most 6 decimal places" },
         { status: 400 }
       );
     }
-
-    // Validate amount is not too large (max 1 billion USDC for safety)
-    if (parsedAmount > 1_000_000_000) {
-      return NextResponse.json(
-        { error: "Amount exceeds maximum allowed value" },
-        { status: 400 }
-      )
-    }
-
-    const amountInAtomicUnits = BigInt(Math.floor(parsedAmount * 1_000_000));
+    const amountInAtomicUnits = parsed.atomic;
 
     // Get the user's multichain SCA wallet
     const { data: wallets, error: walletError } = await supabase
@@ -114,13 +106,13 @@ export async function POST(req: NextRequest) {
       eoaAddress as `0x${string}`
     );
 
-    // Store transaction in database
-    await supabase.from("transaction_history").insert([
+    // Store transaction in database. History is written by the server only.
+    await createAdminClient().from("transaction_history").insert([
       {
         user_id: user.id,
         chain,
         tx_type: "deposit",
-        amount: parseFloat(amount),
+        amount: parsed.value,
         tx_hash: txHash,
         // This should probably be dynamic if you support multiple gateways
         gateway_wallet_address: "0x0077777d7EBA4688BDeF3E311b846F25870A19B9",
@@ -133,7 +125,7 @@ export async function POST(req: NextRequest) {
       success: true,
       txHash,
       chain,
-      amount: parseFloat(amount),
+      amount: parsed.value,
     });
   } catch (error: any) {
     console.error("Error in deposit:", error);
@@ -144,14 +136,15 @@ export async function POST(req: NextRequest) {
       const {
         data: { user },
       } = await supabase.auth.getUser();
+      const failedAmount = parseUsdcAmount(requestBody.amount);
 
-      if (user && requestBody.chain) {
-        await supabase.from("transaction_history").insert([
+      if (user && requestBody.chain && failedAmount) {
+        await createAdminClient().from("transaction_history").insert([
           {
             user_id: user.id,
             chain: requestBody.chain,
             tx_type: "deposit",
-            amount: parseFloat(requestBody.amount || 0),
+            amount: failedAmount.value,
             status: "failed",
             reason: error.message || "Unknown error",
             created_at: new Date().toISOString(),
@@ -162,43 +155,7 @@ export async function POST(req: NextRequest) {
       console.error("Error logging failed transaction:", dbError);
     }
 
-    // Handle specific error types for better user feedback
-
-    let errorMessage = "Internal server error";
-    let statusCode = 500;
-
-    if (error.message) {
-      const msg = error.message.toLowerCase();
-      if (msg.includes("gas") || msg.includes("intrinsic") || msg.includes("fee")) {
-        errorMessage = "Insufficient gas or gas estimation failed. Please ensure you have enough native tokens for gas fees.";
-        statusCode = 400;
-      }
-      // Insufficient balance - check for multiple variations
-      else if (
-        msg.includes("insufficient funds") ||
-        msg.includes("insufficient balance") ||
-        msg.includes("transfer amount exceeds balance") ||
-        msg.includes("exceeds balance")
-      ) {
-        errorMessage = "Insufficient USDC balance for this deposit. Please check your wallet balance and try again.";
-        statusCode = 400;
-      } else if (msg.includes("allowance") || msg.includes("approve")) {
-        errorMessage = "Token approval failed. Please try again.";
-        statusCode = 400;
-      } else if (msg.includes("network") || msg.includes("rpc") || msg.includes("timeout")) {
-        errorMessage = "Network error. Please check your connection and try again.";
-        statusCode = 503;
-      } else if (msg.includes("user rejected") || msg.includes("user denied")) {
-        errorMessage = "Transaction was rejected.";
-        statusCode = 400;
-      } else if (error.message.length < 200) {
-        errorMessage = error.message;
-      }
-    }
-
-    return NextResponse.json(
-      { error: errorMessage },
-      { status: statusCode }
-    );
+    const { message, status } = toUserFacingError(error);
+    return NextResponse.json({ error: message }, { status });
   }
 }
