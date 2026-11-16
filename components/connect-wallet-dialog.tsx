@@ -54,41 +54,12 @@ export function ConnectDialog({ children }: { children: React.ReactNode }) {
         throw new Error("User not authenticated. Please sign in.");
       }
 
-      // 1. Create Wallet Set
-      const walletSetResponse = await fetch("/api/wallet-set", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ entityName: user.email }),
-      });
-      if (!walletSetResponse.ok) {
-        const { error } = await walletSetResponse.json();
-        throw new Error(error || "Failed to create wallet set.");
-      }
-      const createdWalletSet = await walletSetResponse.json();
-
-      // 2. Create Wallet
-      const walletResponse = await fetch("/api/wallet", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ walletSetId: createdWalletSet.id }),
-      });
+      // Wallets are created on the server (the same route sign-up uses). The browser used to
+      // create a wallet set and wallet through open routes and insert the row itself.
+      const walletResponse = await fetch("/api/wallet-set", { method: "POST" });
       if (!walletResponse.ok) {
-        const { error } = await walletResponse.json();
+        const { error } = await walletResponse.json().catch(() => ({}));
         throw new Error(error || "Failed to create wallet.");
-      }
-      const createdWallet = await walletResponse.json();
-
-      // 3. Insert wallet into Supabase, linking it directly to the auth user
-      const { error: insertError } = await supabase.from("wallets").insert({
-        user_id: user.id, // Use the user_id from auth.users
-        circle_wallet_id: createdWallet.id,
-        wallet_set_id: createdWalletSet.id,
-        wallet_address: createdWallet.address,
-      });
-
-      if (insertError) {
-        console.error("Supabase insert error:", insertError);
-        throw new Error("Failed to save wallet to your profile.");
       }
 
       // Success
