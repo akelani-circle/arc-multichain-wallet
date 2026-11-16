@@ -19,38 +19,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { circleDeveloperSdk } from "@/lib/circle/sdk";
 import { createClient } from "@/lib/supabase/server";
-
-export async function PUT(req: NextRequest) {
-  try {
-    const { entityName } = await req.json();
-
-    if (!entityName.trim()) {
-      return NextResponse.json(
-        { error: "entityName is required" },
-        { status: 400 }
-      );
-    }
-
-    const response = await circleDeveloperSdk.createWalletSet({
-      name: entityName,
-    });
-
-    if (!response.data) {
-      return NextResponse.json(
-        "The response did not include a valid wallet set",
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({ ...response.data.walletSet }, { status: 201 });
-  } catch (error: any) {
-    console.error(`Wallet set creation failed: ${error.message}`);
-    return NextResponse.json(
-      { error: "Failed to create wallet set" },
-      { status: 500 }
-    );
-  }
-}
+import { createAdminClient } from "@/lib/supabase/admin";
 
 export async function POST(req: NextRequest) {
   try {
@@ -114,11 +83,20 @@ export async function POST(req: NextRequest) {
       name: "Multichain Wallet",
     }];
 
-    const { error: insertError } = await supabase
+    // Users cannot insert wallet rows themselves (they would be trusted as "my wallet" by
+    // the money-moving routes), so this is written with the secret key.
+    const { error: insertError } = await createAdminClient()
       .from("wallets")
       .insert(walletRecords);
 
     if (insertError) {
+      // 23505: a concurrent request for the same user got there first.
+      if (insertError.code === "23505") {
+        return NextResponse.json({
+          success: true,
+          message: "Wallet set already exists for this user",
+        });
+      }
       console.error("Error storing wallets in database:", insertError);
       throw insertError;
     }
@@ -131,7 +109,7 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     console.error("Wallet set creation failed:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to create wallet set" },
+      { error: "Failed to create wallet set" },
       { status: 500 }
     );
   }
