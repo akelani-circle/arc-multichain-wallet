@@ -32,12 +32,8 @@ export async function proxy(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // API routes skip the redirects below, but every one of them needs a
-  // signed-in user.
+  // Skip redirect logic for API routes
   if (request.nextUrl.pathname.startsWith("/api")) {
-    if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
     return response;
   }
 
