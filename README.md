@@ -113,6 +113,9 @@ SUPABASE_SECRET_KEY=your-secret-key
 # Circle
 CIRCLE_API_KEY=your-circle-api-key
 CIRCLE_ENTITY_SECRET=your-circle-entity-secret
+
+# Arc Testnet RPC key (optional). Without it, the app uses the public Arc Testnet RPC.
+ARC_TESTNET_RPC_KEY=
 ```
 
 | Variable | Scope | Purpose |
@@ -122,6 +125,7 @@ CIRCLE_ENTITY_SECRET=your-circle-entity-secret
 | `SUPABASE_SECRET_KEY` | Server-side, secret | Supabase secret key. Used to write wallet rows and transaction history, which browsers cannot write. Bypasses row level security: never expose it. |
 | `CIRCLE_API_KEY` | Server-side, secret | Circle API key for Gateway and wallet operations. |
 | `CIRCLE_ENTITY_SECRET` | Server-side, secret | Circle entity secret for signing wallet operations. |
+| `ARC_TESTNET_RPC_KEY` | Server-side, secret | Optional Arc Testnet RPC key. Without it, the app uses the public Arc Testnet RPC. |
 
 ## Upgrading
 
