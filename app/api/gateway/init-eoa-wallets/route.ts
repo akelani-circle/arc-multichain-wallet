@@ -16,11 +16,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { storeGatewayEOAWalletForUser } from "@/lib/circle/create-gateway-eoa-wallets";
 
-export async function POST(req: NextRequest) {
+export async function POST() {
   const supabase = await createClient();
   const {
     data: { user },
@@ -71,10 +71,10 @@ export async function POST(req: NextRequest) {
       message: "Gateway EOA wallet created successfully",
       wallet: wallet[0],
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error initializing EOA wallet:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to initialize EOA wallet" },
+      { error: "Failed to initialize EOA wallet" },
       { status: 500 }
     );
   }

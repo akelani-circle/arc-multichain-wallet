@@ -43,3 +43,7 @@ yarn-error.log*
 next-env.d.ts
 
 .vscode/
+
+# written by `next dev` when it detects an AI coding agent
+/AGENTS.md
+/CLAUDE.md

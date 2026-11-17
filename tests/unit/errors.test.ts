@@ -27,6 +27,10 @@ describe("toUserFacingError", () => {
     ["allowance too low", 400, /approval/i],
     ["fetch failed: network unreachable", 503, /Network/],
     ["user rejected the request", 400, /rejected/],
+    ["Transaction 95cb9717 failed with reason: INSUFFICIENT_TOKEN", 400, /Insufficient USDC/],
+    ["Transaction 599f6c9c failed with reason: ESTIMATION_ERROR", 400, /would fail on-chain/],
+    ["Insufficient Gateway balance on arcTestnet: needs 1.00385 USDC", 400, /fee is taken on top/],
+    ["Transaction 1a2b not confirmed within 180s (last state: SENT)", 504, /longer than expected/],
   ])("maps %j to a friendly message", (raw, status, message) => {
     const result = toUserFacingError(new Error(raw));
     expect(result.status).toBe(status);

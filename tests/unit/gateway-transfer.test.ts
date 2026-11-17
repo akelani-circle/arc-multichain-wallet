@@ -26,10 +26,9 @@ const admin = vi.hoisted(() => ({ from: vi.fn() }));
 const gateway = vi.hoisted(() => ({
   transferGatewayBalanceWithEOA: vi.fn(),
   executeMintCircle: vi.fn(),
-  withdrawFromCustodialWallet: vi.fn(),
-  getCircleWalletAddress: vi.fn(),
   checkWalletGasBalance: vi.fn(),
   CIRCLE_CHAIN_NAMES: { arcTestnet: "ARC-TESTNET", baseSepolia: "BASE-SEPOLIA", avalancheFuji: "AVAX-FUJI" },
+  InsufficientGatewayBalanceError: class InsufficientGatewayBalanceError extends Error {},
 }));
 const eoa = vi.hoisted(() => ({ getGatewayEOAWalletId: vi.fn() }));
 const sdk = vi.hoisted(() => ({ circleDeveloperSdk: { getWallet: vi.fn() } }));
@@ -43,6 +42,7 @@ vi.mock("@/lib/circle/sdk", () => sdk);
 import { POST } from "@/app/api/gateway/transfer/route";
 
 const RECIPIENT = "0x" + "b2".repeat(20);
+const EOA_ADDRESS = "0x" + "e0".repeat(20);
 const body = (over: Record<string, unknown> = {}) => ({
   sourceChain: "arcTestnet",
   destinationChain: "baseSepolia",
@@ -63,7 +63,7 @@ beforeEach(() => {
   user.from.mockReset();
   user.auth.getUser.mockReset();
   admin.from.mockReset();
-  Object.values(gateway).forEach((fn) => typeof fn === "function" && (fn as ReturnType<typeof vi.fn>).mockReset());
+  Object.values(gateway).forEach((fn) => vi.isMockFunction(fn) && fn.mockReset());
   eoa.getGatewayEOAWalletId.mockReset();
   gateway.checkWalletGasBalance.mockResolvedValue({ hasGas: true, address: SCA_WALLET.address, balance: "1" });
   gateway.transferGatewayBalanceWithEOA.mockResolvedValue({ attestation: "0xatt", attestationSignature: "0xsig" });
@@ -138,25 +138,60 @@ describe("POST /api/gateway/transfer — moving funds", () => {
     });
   });
 
-  it("sends to a valid external recipient", async () => {
+  it("sends to a valid external recipient, minting from the user's EOA", async () => {
     signedIn(user as UserClient, withWallet());
-    eoa.getGatewayEOAWalletId.mockResolvedValue({ walletId: "cw-eoa", address: "0x" + "e0".repeat(20) });
+    eoa.getGatewayEOAWalletId.mockResolvedValue({ walletId: "cw-eoa", address: EOA_ADDRESS });
     queueTables(admin, { transaction_history: [queryBuilder({})] });
 
     const res = await post(body({ recipientAddress: RECIPIENT }));
 
     expect(res.status).toBe(200);
     expect(gateway.transferGatewayBalanceWithEOA.mock.calls[0][4]).toBe(RECIPIENT);
+    expect(gateway.checkWalletGasBalance).toHaveBeenCalledWith(EOA_ADDRESS, "baseSepolia");
+    expect(gateway.executeMintCircle.mock.calls[0].slice(0, 2)).toEqual([EOA_ADDRESS, "baseSepolia"]);
     expect((await res.json()).recipient).toBe(RECIPIENT);
   });
 
-  it("refuses when the wallet that will mint has no gas, before burning", async () => {
+  it.each(["baseSepolia", "avalancheFuji"])(
+    "mints to the user's own wallet on %s from the SCA without a gas check (Gas Station pays)",
+    async (destinationChain) => {
+      signedIn(user as UserClient, withWallet());
+      gateway.checkWalletGasBalance.mockResolvedValue({ hasGas: false, address: SCA_WALLET.address });
+      queueTables(admin, { transaction_history: [queryBuilder({})] });
+
+      const res = await post(body({ destinationChain }));
+
+      expect(res.status).toBe(200);
+      expect(gateway.checkWalletGasBalance).not.toHaveBeenCalled();
+      expect(gateway.executeMintCircle.mock.calls[0].slice(0, 2)).toEqual([
+        SCA_WALLET.address,
+        destinationChain,
+      ]);
+    }
+  );
+
+  it("refuses when the EOA that will mint for an external recipient has no gas, before burning", async () => {
     signedIn(user as UserClient, withWallet());
-    gateway.checkWalletGasBalance.mockResolvedValue({ hasGas: false, address: SCA_WALLET.address });
-    const res = await post(body());
+    eoa.getGatewayEOAWalletId.mockResolvedValue({ walletId: "cw-eoa", address: EOA_ADDRESS });
+    gateway.checkWalletGasBalance.mockResolvedValue({ hasGas: false, address: EOA_ADDRESS });
+    const res = await post(body({ recipientAddress: RECIPIENT }));
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toBe("INSUFFICIENT_GAS");
+    expect(await res.json()).toMatchObject({ error: "INSUFFICIENT_GAS", walletAddress: EOA_ADDRESS });
     expect(gateway.transferGatewayBalanceWithEOA).not.toHaveBeenCalled();
+  });
+
+  it("refuses with a clear 400 when the Gateway balance can't cover amount + fee, recording nothing", async () => {
+    signedIn(user as UserClient, withWallet());
+    gateway.transferGatewayBalanceWithEOA.mockRejectedValue(
+      new gateway.InsufficientGatewayBalanceError("Insufficient Gateway balance on arcTestnet: needs 1.00385 USDC")
+    );
+
+    const res = await post(body({ destinationChain: "arcTestnet", amount: "1" }));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/Insufficient Gateway balance/);
+    expect(gateway.executeMintCircle).not.toHaveBeenCalled();
+    expect(admin.from).not.toHaveBeenCalled();
   });
 
   it("does not leak the text of an unexpected error", async () => {

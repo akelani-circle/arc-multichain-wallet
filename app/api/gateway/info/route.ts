@@ -16,11 +16,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { fetchGatewayInfo } from "@/lib/circle/gateway-sdk";
 import { createClient } from "@/lib/supabase/server";
 
-export async function GET(req: NextRequest) {
+export async function GET() {
   try {
     const supabase = await createClient();
     const {
@@ -38,10 +38,10 @@ export async function GET(req: NextRequest) {
       success: true,
       ...info,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error fetching Gateway info:", error);
     return NextResponse.json(
-      { error: error.message || "Internal server error" },
+      { error: "Failed to fetch Gateway info" },
       { status: 500 }
     );
   }

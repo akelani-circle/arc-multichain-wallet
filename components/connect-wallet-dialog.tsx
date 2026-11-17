@@ -65,8 +65,8 @@ export function ConnectDialog({ children }: { children: React.ReactNode }) {
       // Success
       setOpen(false);
       window.location.reload(); // Reload to reflect the new wallet in the dashboard
-    } catch (error: any) {
-      setCircleWalletError(error.message);
+    } catch (error: unknown) {
+      setCircleWalletError(error instanceof Error ? error.message : "Failed to create wallet.");
     } finally {
       setIsCreatingCircleWallet(false);
     }

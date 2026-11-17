@@ -29,8 +29,9 @@ vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => admin }));
 vi.mock("@/lib/circle/sdk", () => ({ circleDeveloperSdk: circle }));
 
 import * as route from "@/app/api/wallet-set/route";
+import { idempotencyKeyFor } from "@/lib/circle/idempotency";
 
-const post = () => route.POST(new Request("http://localhost/api/wallet-set", { method: "POST" }) as never);
+const post = () => route.POST();
 
 beforeEach(() => {
   user.from.mockReset();
@@ -74,6 +75,16 @@ describe("/api/wallet-set", () => {
       type: "sca",
     });
     expect(user.from).toHaveBeenCalledTimes(1); // only the "exists?" read
+  });
+
+  it("asks Circle with fixed per-user idempotency keys, so a concurrent request gets the same wallet", async () => {
+    signedIn(user as UserClient, { wallets: [queryBuilder({ data: [] })] });
+    queueTables(admin, { wallets: [queryBuilder({})] });
+
+    await post();
+
+    expect(circle.createWalletSet.mock.calls[0][0].idempotencyKey).toBe(idempotencyKeyFor(USER.id, "wallet_set"));
+    expect(circle.createWallets.mock.calls[0][0].idempotencyKey).toBe(idempotencyKeyFor(USER.id, "sca"));
   });
 
   it("treats losing a concurrent creation race as success", async () => {

@@ -19,6 +19,8 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createSupabaseReqResClient } from "@/lib/supabase/server-client";
 
+const SIGNED_IN_AUTH_PATHS = ["/auth/confirm", "/auth/update-password", "/auth/error"];
+
 export async function proxy(request: NextRequest) {
   const response = NextResponse.next({
     request: {
@@ -41,7 +43,14 @@ export async function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL("/", request.url));
   }
 
-  if (user && !request.nextUrl.pathname.startsWith("/dashboard")) {
+  // Signed-in users go to the dashboard, except where they must be signed in to finish an
+  // auth step: following an email link (/auth/confirm), seeing why it failed, and choosing a
+  // new password.
+  if (
+    user &&
+    !request.nextUrl.pathname.startsWith("/dashboard") &&
+    !SIGNED_IN_AUTH_PATHS.includes(request.nextUrl.pathname)
+  ) {
     return NextResponse.redirect(new URL("/dashboard", request.url));
   }
 

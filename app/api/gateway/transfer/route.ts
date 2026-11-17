@@ -20,18 +20,18 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   transferGatewayBalanceWithEOA,
   executeMintCircle,
-  withdrawFromCustodialWallet,
-  getCircleWalletAddress,
+  checkWalletGasBalance,
+  InsufficientGatewayBalanceError,
   type SupportedChain,
   CIRCLE_CHAIN_NAMES,
 } from "@/lib/circle/gateway-sdk";
+import { getGatewayEOAWalletId } from "@/lib/circle/create-gateway-eoa-wallets";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { parseUsdcAmount } from "@/lib/usdc";
 import { toUserFacingError } from "@/lib/errors";
 import { isAddress, zeroAddress, type Address } from "viem";
-import { Transaction, Blockchain } from "@circle-fin/developer-controlled-wallets";
-import { circleDeveloperSdk } from "@/lib/circle/sdk";
+import { Transaction } from "@circle-fin/developer-controlled-wallets";
 
 export async function POST(req: NextRequest) {
   const supabase = await createClient();
@@ -127,58 +127,47 @@ export async function POST(req: NextRequest) {
     }
 
     const wallet = wallets[0];
-    const walletId = wallet.circle_wallet_id;
     const walletAddress = wallet.address as Address;
     const recipient = recipientAddress || walletAddress;
 
     // Determine if we're using external recipient
-    const isExternalRecipient = recipientAddress && recipientAddress.toLowerCase() !== walletAddress.toLowerCase();
-    
-    // PRE-FLIGHT CHECK: Verify gas balance on destination chain BEFORE burning
-    const { getGatewayEOAWalletId } = await import("@/lib/circle/create-gateway-eoa-wallets");
-    const { checkWalletGasBalance } = await import("@/lib/circle/gateway-sdk");
-    
-    try {
-      let minterWalletId: string;
-      
-      if (isExternalRecipient) {
-        // For external recipients, EOA wallet will execute mint
-        const chainMap: Record<SupportedChain, string> = {
-          baseSepolia: 'BASE-SEPOLIA',
-          avalancheFuji: 'AVAX-FUJI',
-          arcTestnet: 'ARC-TESTNET',
-        };
-        const { walletId: eoaWalletId } = await getGatewayEOAWalletId(user.id, chainMap[destinationChain as SupportedChain]);
-        minterWalletId = eoaWalletId;
-      } else {
-        // For own wallet, SCA wallet will execute mint
-        minterWalletId = walletId;
+    const isExternalRecipient =
+      !!recipientAddress && recipientAddress.toLowerCase() !== walletAddress.toLowerCase();
+
+    // The wallet that calls gatewayMint on the destination chain. For the user's own wallet
+    // it is the SCA, whose gas Circle Gas Station pays, so it needs no native tokens. For an
+    // external recipient it is the user's EOA, which pays its own gas.
+    let minterAddress = walletAddress;
+    if (isExternalRecipient) {
+      const { address: eoaAddress } = await getGatewayEOAWalletId(user.id);
+      minterAddress = eoaAddress as Address;
+
+      // PRE-FLIGHT CHECK: Verify the EOA has gas on the destination chain BEFORE burning
+      try {
+        const gasCheck = await checkWalletGasBalance(minterAddress, destinationChain as SupportedChain);
+
+        if (!gasCheck.hasGas) {
+          return NextResponse.json(
+            {
+              error: "INSUFFICIENT_GAS",
+              walletAddress: gasCheck.address,
+              blockchain: CIRCLE_CHAIN_NAMES[destinationChain as SupportedChain],
+              chain: destinationChain,
+              message: `Insufficient gas: The wallet that will execute the mint transaction has no native tokens on ${destinationChain}.`,
+            },
+            { status: 400 }
+          );
+        }
+
+        console.log(`Gas check passed for ${gasCheck.address} on ${destinationChain} (balance: ${gasCheck.balance})`);
+      } catch (gasCheckError: unknown) {
+        console.error("Gas pre-flight check failed:", gasCheckError);
+        // Continue anyway - the actual mint will catch this if it's a real issue
       }
-      
-      // Check if the minter wallet has gas
-      const gasCheck = await checkWalletGasBalance(minterWalletId, destinationChain as SupportedChain);
-      
-      if (!gasCheck.hasGas) {
-        return NextResponse.json(
-          {
-            error: "INSUFFICIENT_GAS",
-            walletId: minterWalletId,
-            walletAddress: gasCheck.address,
-            blockchain: CIRCLE_CHAIN_NAMES[destinationChain as SupportedChain],
-            chain: destinationChain,
-            message: `Insufficient gas: The wallet that will execute the mint transaction has no native tokens on ${destinationChain}.`,
-          },
-          { status: 400 }
-        );
-      }
-      
-      console.log(`Gas check passed for ${gasCheck.address} on ${destinationChain} (balance: ${gasCheck.balance})`);
-    } catch (gasCheckError: any) {
-      console.error("Gas pre-flight check failed:", gasCheckError);
-      // Continue anyway - the actual mint will catch this if it's a real issue
     }
 
-    // Use EOA-signed burn/mint process for all transfers (same-chain and cross-chain)
+    // Use EOA-signed burn/mint process for all transfers (same-chain and cross-chain).
+    // Refuses before signing if the source chain's Gateway balance can't cover amount + fee.
     const { attestation, attestationSignature } = await transferGatewayBalanceWithEOA(
       user.id,
       amountInAtomicUnits,
@@ -189,14 +178,11 @@ export async function POST(req: NextRequest) {
     );
 
     // Execute mint on destination chain
-    // If recipient is external (not the user's wallet), use EOA to execute mint
-    // Otherwise use the user's Circle SCA wallet
     const mintTx: Transaction = await executeMintCircle(
-      isExternalRecipient ? user.id : walletId,
+      minterAddress,
       destinationChain as SupportedChain,
       attestation,
-      attestationSignature,
-      isExternalRecipient // Pass true if using userId instead of walletId
+      attestationSignature
     );
 
     const attestationHash = attestation;
@@ -226,32 +212,15 @@ export async function POST(req: NextRequest) {
       amount: parsed.value,
       recipient,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error in transfer:", error);
 
-    // Check if this is an insufficient gas error
-    if (error.message?.startsWith("INSUFFICIENT_GAS:")) {
-      const [, walletId, blockchain] = error.message.split(":");
-      
-      // Get the wallet address
-      try {
-        const walletResponse = await circleDeveloperSdk.getWallet({ id: walletId });
-        const eoaAddress = walletResponse.data?.wallet?.address;
-        
-        return NextResponse.json(
-          {
-            error: "INSUFFICIENT_GAS",
-            walletId,
-            walletAddress: eoaAddress,
-            blockchain,
-            chain: destinationChain,
-          },
-          { status: 400 }
-        );
-      } catch (walletError) {
-        console.error("Error fetching wallet details:", walletError);
-      }
+    // Refused before anything was signed or burned: nothing to record.
+    if (error instanceof InsufficientGatewayBalanceError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
     }
+
+    const errorMessage = error instanceof Error ? error.message : "";
 
     // Log failed transaction to database
     try {
@@ -270,13 +239,27 @@ export async function POST(req: NextRequest) {
             amount: failedAmount.value,
             destination_chain: destinationChain,
             status: "failed",
-            reason: error.message || "Unknown error",
+            reason: errorMessage || "Unknown error",
             created_at: new Date().toISOString(),
           },
         ]);
       }
     } catch (dbError) {
       console.error("Error logging failed transaction:", dbError);
+    }
+
+    // Check if this is an insufficient gas error
+    if (errorMessage.startsWith("INSUFFICIENT_GAS:")) {
+      const [, walletAddress, blockchain] = errorMessage.split(":");
+      return NextResponse.json(
+        {
+          error: "INSUFFICIENT_GAS",
+          walletAddress,
+          blockchain,
+          chain: destinationChain,
+        },
+        { status: 400 }
+      );
     }
 
     const { message, status } = toUserFacingError(error);

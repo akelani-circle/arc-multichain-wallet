@@ -25,7 +25,37 @@ export function toUserFacingError(error: unknown): { message: string; status: nu
   const raw = error instanceof Error ? error.message : "";
   const msg = raw.toLowerCase();
 
-  if (msg.includes("gas") || msg.includes("intrinsic") || msg.includes("fee")) {
+  // Circle's reasons for a FAILED transaction (see waitForTransactionConfirmation), and the
+  // Gateway balance check. Matched first: their messages carry IDs and amounts.
+  if (msg.includes("insufficient gateway balance")) {
+    return {
+      message:
+        "Insufficient Gateway balance for this transfer. The Gateway fee is taken on top of the amount.",
+      status: 400,
+    };
+  }
+  if (msg.includes("insufficient_token")) {
+    return {
+      message: "Insufficient USDC balance for this operation. Please check your balance and try again.",
+      status: 400,
+    };
+  }
+  if (msg.includes("estimation_error")) {
+    return {
+      message:
+        "The transaction would fail on-chain, so it was not sent. Please check your balances and try again.",
+      status: 400,
+    };
+  }
+  if (msg.includes("not confirmed within")) {
+    return {
+      message:
+        "The transaction is taking longer than expected. Check your balance and history before trying again.",
+      status: 504,
+    };
+  }
+
+  if (/\bgas\b|intrinsic|\bfees?\b/.test(msg)) {
     return {
       message:
         "Insufficient gas or gas estimation failed. Please ensure you have enough native tokens for gas fees.",
