@@ -27,7 +27,7 @@ A sample application demonstrating how to build optimal USDC interoperability UX
 
 ## Prerequisites
 
-- Node.js 20.x or newer
+- Node.js 22.12 or newer, on an LTS line (22, 24 or 26)
 - npm (automatically installed when Node.js is installed)
 - Docker (for running Supabase locally)
 - Circle Developer Controlled Wallets [API key](https://console.circle.com/signin) and [Entity Secret](https://developers.circle.com/wallets/dev-controlled/register-entity-secret)
@@ -57,7 +57,7 @@ A sample application demonstrating how to build optimal USDC interoperability UX
 
    ```bash
    npm run supabase -- link --project-ref <your-project-ref>
-   npm run supabase -- db push
+   npm run supabase -- db push --remote
    ```
 
    Hosted Supabase asks new users to confirm their email by default. The confirmation and password reset links land on `/auth/confirm`, so add `<your-site-url>/**` to **Authentication → URL Configuration → Redirect URLs** (the local `supabase/config.toml` does the same). Locally, confirmation is off, and every email the app sends is shown in the mail testing UI at `http://127.0.0.1:54324`.
@@ -142,7 +142,7 @@ ARC_TESTNET_RPC_KEY=
 Changes that require action on an existing deployment:
 
 - **Add `SUPABASE_SECRET_KEY`** to `.env.local` (and to your deployment). Wallet rows and transaction history are now written by the server with it; without it, wallet creation and deposits fail.
-- **Apply the new migration** (`npm run db:start` locally, `npm run supabase -- db push` on a hosted project). It:
+- **Apply the new migration** (`npm run db:start` locally, `npm run supabase -- db push --remote` on a hosted project). It:
   - enables row level security on `transaction_history`, which never had it, so **anyone with the publishable key could read every user's history and insert, edit or delete rows**. Users can now only read their own;
   - stops users inserting `wallets` rows. The deposit and transfer routes act on the user's `type = 'sca'` row with the app's Circle key, so a user-writable row was a way to point them at a wallet that was not the user's;
   - allows one `sca` wallet and one `gateway_signer` per user. **If the migration fails on the unique index, a user already has duplicates** (concurrent sign-ups could create two): keep one, remove the rest, and re-run.
