@@ -17,8 +17,10 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { formatUnits, type Address } from "viem";
 import {
   initiateDepositFromCustodialWallet,
+  getUsdcBalance,
   type SupportedChain,
 } from "@/lib/circle/gateway-sdk";
 import { createClient } from "@/lib/supabase/server";
@@ -27,7 +29,7 @@ import { parseUsdcAmount } from "@/lib/usdc";
 import { toUserFacingError } from "@/lib/errors";
 
 export async function POST(req: NextRequest) {
-  let requestBody: any = {};
+  let requestBody: { chain?: unknown; amount?: unknown } = {};
   
   try {
     const supabase = await createClient();
@@ -51,7 +53,7 @@ export async function POST(req: NextRequest) {
 
     // Validate chain
     const validChains: SupportedChain[] = ["arcTestnet", "baseSepolia", "avalancheFuji"];
-    if (!validChains.includes(chain)) {
+    if (!validChains.includes(chain as SupportedChain)) {
       return NextResponse.json(
         { error: `Invalid chain. Must be one of: ${validChains.join(", ")}` },
         { status: 400 }
@@ -93,17 +95,31 @@ export async function POST(req: NextRequest) {
     }
 
     const wallet = wallets[0];
+    const walletAddress = wallet.address as Address;
+
+    // Check the wallet holds the USDC before sending anything: otherwise addDelegate and
+    // approve go through and only the deposit itself fails.
+    const walletBalance = await getUsdcBalance(walletAddress, chain as SupportedChain);
+    if (walletBalance < amountInAtomicUnits) {
+      return NextResponse.json(
+        {
+          error: `Insufficient USDC balance: your wallet holds ${formatUnits(walletBalance, 6)} USDC on this chain.`,
+        },
+        { status: 400 }
+      );
+    }
 
     // Get or create EOA signer wallet (multichain)
     const { getOrCreateGatewayEOAWallet } = await import("@/lib/circle/create-gateway-eoa-wallets");
-    const { address: eoaAddress } = await getOrCreateGatewayEOAWallet(user.id, chain);
+    const { address: eoaAddress } = await getOrCreateGatewayEOAWallet(user.id);
 
-    // Deposit to Gateway and add EOA as delegate (allows EOA to sign burn intents)
+    // Deposit to Gateway on the requested chain, adding the EOA as delegate there if it
+    // isn't one yet (allows the EOA to sign burn intents)
     const txHash = await initiateDepositFromCustodialWallet(
-      wallet.circle_wallet_id,
+      walletAddress,
       chain as SupportedChain,
       amountInAtomicUnits,
-      eoaAddress as `0x${string}`
+      eoaAddress as Address
     );
 
     // Store transaction in database. History is written by the server only.
@@ -127,7 +143,7 @@ export async function POST(req: NextRequest) {
       chain,
       amount: parsed.value,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error in deposit:", error);
 
     // Log failed transaction to database
@@ -146,7 +162,7 @@ export async function POST(req: NextRequest) {
             tx_type: "deposit",
             amount: failedAmount.value,
             status: "failed",
-            reason: error.message || "Unknown error",
+            reason: (error instanceof Error && error.message) || "Unknown error",
             created_at: new Date().toISOString(),
           },
         ]);

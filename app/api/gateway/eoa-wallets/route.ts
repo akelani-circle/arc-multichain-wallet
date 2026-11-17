@@ -16,12 +16,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { circleDeveloperSdk } from "@/lib/circle/sdk";
-import type { SupportedChain } from "@/lib/circle/gateway-sdk";
+import { CIRCLE_CHAIN_NAMES, type SupportedChain } from "@/lib/circle/gateway-sdk";
 
-export async function GET(req: NextRequest) {
+export async function GET() {
   const supabase = await createClient();
   const {
     data: { user },
@@ -33,39 +32,23 @@ export async function GET(req: NextRequest) {
 
   try {
     const { getGatewayEOAWalletId } = await import("@/lib/circle/create-gateway-eoa-wallets");
-    
-    const chains = ["BASE-SEPOLIA", "AVAX-FUJI", "ARC-TESTNET"];
-    const chainMap: Record<string, SupportedChain> = {
-      "BASE-SEPOLIA": "baseSepolia",
-      "AVAX-FUJI": "avalancheFuji",
-      "ARC-TESTNET": "arcTestnet",
-    };
-    
-    const wallets = await Promise.all(
-      chains.map(async (blockchain) => {
-        try {
-          const { walletId, address } = await getGatewayEOAWalletId(user.id, blockchain);
-          return {
-            chain: chainMap[blockchain],
-            blockchain,
-            walletId,
-            address,
-          };
-        } catch (error) {
-          console.error(`Error fetching EOA wallet for ${blockchain}:`, error);
-          return null;
-        }
-      })
-    );
 
+    // One multichain EOA: the same wallet and address on every chain.
+    let signer: { walletId: string; address: string } | null = null;
+    try {
+      signer = await getGatewayEOAWalletId(user.id);
+    } catch (error) {
+      console.error("Error fetching EOA wallet:", error);
+    }
+
+    const chains: SupportedChain[] = ["baseSepolia", "avalancheFuji", "arcTestnet"];
     return NextResponse.json({
-      wallets: wallets.filter(w => w !== null),
+      wallets: signer
+        ? chains.map((chain) => ({ chain, blockchain: CIRCLE_CHAIN_NAMES[chain], ...signer }))
+        : [],
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error fetching EOA wallets:", error);
-    return NextResponse.json(
-      { error: error.message || "Failed to fetch EOA wallets" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Failed to fetch EOA wallets" }, { status: 500 });
   }
 }

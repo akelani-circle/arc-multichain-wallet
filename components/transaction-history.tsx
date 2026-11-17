@@ -18,14 +18,9 @@
 
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { useState, useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Table,
   TableBody,
@@ -72,7 +67,7 @@ interface Transaction {
 
 // Chain configuration for explorer links
 const CHAIN_EXPLORERS: Record<string, string> = {
-  arcTestnet: "https://testnet.arcscan.app/",
+  arcTestnet: "https://explorer.testnet.arc.io/",
   baseSepolia: "https://sepolia.basescan.org/",
   avalancheFuji: "https://testnet.snowtrace.io/",
 };
@@ -83,51 +78,42 @@ const CHAIN_NAMES: Record<string, string> = {
   avalancheFuji: "Avalanche Fuji",
 };
 
-export function TransactionHistory() {
-  const [isMounted, setIsMounted] = useState(false);
+type SortOrder = "none" | "asc" | "desc";
 
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+function SortIcon({ order }: { order: SortOrder }) {
+  if (order === "asc") return <ArrowUp className="ml-2 h-4 w-4 inline" />;
+  if (order === "desc") return <ArrowDown className="ml-2 h-4 w-4 inline" />;
+  return <ArrowUpDown className="ml-2 h-4 w-4 inline" />;
+}
+
+export function TransactionHistory() {
+  // Fetched in the browser only. The dashboard refreshes it after a deposit or transfer.
+  const {
+    data: transactions = [],
+    isPending: loading,
+    error,
+  } = useQuery({
+    queryKey: ["transactions"],
+    queryFn: async (): Promise<Transaction[]> => {
+      const response = await fetch("/api/transactions");
+      if (!response.ok) {
+        throw new Error(`Error: ${response.statusText}`);
+      }
+      return response.json();
+    },
+  });
 
   // Filter and sort state
   const [searchTerm, setSearchTerm] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [sortOrder, setSortOrder] = useState<"none" | "asc" | "desc">("desc");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
   const [currentPage, setCurrentPage] = useState(1);
   const rowsPerPage = 10;
 
-  useEffect(() => {
-    setIsMounted(true);
-  }, []);
-
-  useEffect(() => {
-    async function fetchTransactions() {
-      setLoading(true);
-      try {
-        const response = await fetch("/api/transactions");
-        if (!response.ok) {
-          throw new Error(`Error: ${response.statusText}`);
-        }
-        const data = await response.json();
-        setTransactions(data);
-      } catch (err: any) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    // Only fetch if we are mounted and connected
-    if (isMounted) {
-      fetchTransactions();
-    }
-  }, [isMounted]);
-
   // Filter and sort transactions
   const filteredAndSortedTransactions = useMemo(() => {
-    let filtered = transactions.filter((tx) => {
+    const filtered = transactions.filter((tx) => {
       // Search filter (tx hash, chain, or destination chain)
       const searchLower = searchTerm.toLowerCase();
       const matchesSearch =
@@ -170,14 +156,6 @@ export function TransactionHistory() {
     if (sortOrder === "none") setSortOrder("desc");
     else if (sortOrder === "desc") setSortOrder("asc");
     else setSortOrder("none");
-  };
-
-  const SortIcon = () => {
-    if (sortOrder === "asc")
-      return <ArrowUp className="ml-2 h-4 w-4 inline" />;
-    if (sortOrder === "desc")
-      return <ArrowDown className="ml-2 h-4 w-4 inline" />;
-    return <ArrowUpDown className="ml-2 h-4 w-4 inline" />;
   };
 
   const getStatusBadge = (status: TransactionStatus) => {
@@ -226,22 +204,13 @@ export function TransactionHistory() {
     return `${hash.slice(0, 6)}...${hash.slice(-4)}`;
   };
 
-  // Reset to page 1 when filters change
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [searchTerm, typeFilter, statusFilter]);
-
-  // This ensures the initial client render matches the server render (which is always disconnected state).
-  if (!isMounted) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Transaction History</CardTitle>
-          <CardDescription>Please connect your wallet to view your transactions</CardDescription>
-        </CardHeader>
-      </Card>
-    );
-  }
+  // Changing a filter goes back to page 1
+  const withPageReset =
+    <T,>(setter: (value: T) => void) =>
+    (value: T) => {
+      setter(value);
+      setCurrentPage(1);
+    };
 
   return (
     <Card>
@@ -253,10 +222,10 @@ export function TransactionHistory() {
             <Input
               placeholder="Search by transaction hash"
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(e) => withPageReset(setSearchTerm)(e.target.value)}
               className="sm:max-w-xs"
             />
-            <Select value={typeFilter} onValueChange={setTypeFilter}>
+            <Select value={typeFilter} onValueChange={withPageReset(setTypeFilter)}>
               <SelectTrigger className="sm:w-[180px]">
                 <SelectValue placeholder="Filter by type" />
               </SelectTrigger>
@@ -267,7 +236,7 @@ export function TransactionHistory() {
                 <SelectItem value="unify">Unify</SelectItem>
               </SelectContent>
             </Select>
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <Select value={statusFilter} onValueChange={withPageReset(setStatusFilter)}>
               <SelectTrigger className="sm:w-[180px]">
                 <SelectValue placeholder="Filter by status" />
               </SelectTrigger>
@@ -293,7 +262,7 @@ export function TransactionHistory() {
                   <TableHead>
                     <Button variant="ghost" onClick={handleSort} className="h-8 p-0">
                       Date
-                      <SortIcon />
+                      <SortIcon order={sortOrder} />
                     </Button>
                   </TableHead>
                 </TableRow>
@@ -310,7 +279,7 @@ export function TransactionHistory() {
                 ) : error ? (
                   <TableRow>
                     <TableCell colSpan={6} className="text-center text-red-500">
-                      Error: {error}
+                      Error: {error.message}
                     </TableCell>
                   </TableRow>
                 ) : paginatedTransactions.length > 0 ? (

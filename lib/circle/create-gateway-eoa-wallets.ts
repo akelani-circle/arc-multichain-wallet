@@ -25,6 +25,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { circleDeveloperSdk } from "@/lib/circle/sdk";
+import { idempotencyKeyFor, withIdempotentRetry } from "@/lib/circle/idempotency";
 
 export interface GatewayEOAWallet {
   chain: string;
@@ -38,14 +39,22 @@ export interface GatewayEOAWallet {
  * Creates one EOA wallet that works across all EVM chains
  * Circle SDK automatically derives the same address across all chains
  */
-export async function generateGatewayEOAWallet(walletSetId: string): Promise<GatewayEOAWallet> {
-  // Create EOA wallet on ALL supported chains so Circle SDK recognizes it everywhere
-  const response = await circleDeveloperSdk.createWallets({
-    walletSetId,
-    accountType: "EOA",
-    blockchains: ["ARC-TESTNET", "BASE-SEPOLIA", "AVAX-FUJI"],
-    count: 1,
-  });
+export async function generateGatewayEOAWallet(
+  walletSetId: string,
+  userId: string
+): Promise<GatewayEOAWallet> {
+  // Create EOA wallet on ALL supported chains so Circle SDK recognizes it everywhere.
+  // One idempotency key per user: concurrent requests (the dashboard and sign-up both ask
+  // for it) get the same wallet back instead of each creating one.
+  const response = await withIdempotentRetry(() =>
+    circleDeveloperSdk.createWallets({
+      walletSetId,
+      accountType: "EOA",
+      blockchains: ["ARC-TESTNET", "BASE-SEPOLIA", "AVAX-FUJI"],
+      count: 1,
+      idempotencyKey: idempotencyKeyFor(userId, "gateway_signer"),
+    })
+  );
 
   if (!response.data?.wallets || response.data.wallets.length === 0) {
     throw new Error("Failed to create Gateway EOA wallet via Circle SDK");
@@ -63,15 +72,16 @@ export async function generateGatewayEOAWallet(walletSetId: string): Promise<Gat
 }
 
 /**
- * Create wallet set and Gateway EOA wallet for a user
- * Creates one multichain EOA wallet that can sign for all chains
+ * Create the Gateway EOA wallet for a user and store it.
+ * Creates one multichain EOA wallet that can sign for all chains. If a concurrent request
+ * stored it first, returns that row.
  */
 export async function storeGatewayEOAWalletForUser(userId: string, walletSetId: string) {
   // Wallet rows are written only by the server (see migration 20260919120000).
   const supabase = createAdminClient();
 
   // Create one EOA wallet in the wallet set
-  const wallet = await generateGatewayEOAWallet(walletSetId);
+  const wallet = await generateGatewayEOAWallet(walletSetId, userId);
 
   // Store wallet information in database - one record for the multichain wallet
   const insertData = {
@@ -91,6 +101,15 @@ export async function storeGatewayEOAWalletForUser(userId: string, walletSetId: 
     .select();
 
   if (error) {
+    // 23505: a concurrent request for the same user stored the signer first.
+    if (error.code === "23505") {
+      const { data: existing, error: readError } = await supabase
+        .from("wallets")
+        .select()
+        .eq("user_id", userId)
+        .eq("type", "gateway_signer");
+      if (!readError && existing && existing.length > 0) return existing;
+    }
     console.error("Error storing Gateway EOA wallet:", error);
     throw error;
   }
@@ -102,16 +121,15 @@ export async function storeGatewayEOAWalletForUser(userId: string, walletSetId: 
 }
 
 /**
- * Get Gateway EOA wallet ID for a user (works for all blockchains)
- * Returns the Circle wallet ID which can be used with Circle SDK for transactions
+ * Get the Gateway EOA wallet for a user. It is one multichain row (blockchain = "MULTICHAIN");
+ * its address is the same on every chain. The ID is that of its Arc wallet, which is enough
+ * for signing (burn intents are not chain-specific); transactions select it by address.
  */
 export async function getGatewayEOAWalletId(
-  userId: string,
-  blockchain: string
+  userId: string
 ): Promise<{ walletId: string; address: string }> {
   const supabase = await createClient();
 
-  // Get the multichain EOA wallet (blockchain = "MULTICHAIN")
   const { data, error } = await supabase
     .from("wallets")
     .select("circle_wallet_id, address")
@@ -134,13 +152,12 @@ export async function getGatewayEOAWalletId(
  * If wallet doesn't exist, creates it for the user using their SCA wallet set
  */
 export async function getOrCreateGatewayEOAWallet(
-  userId: string,
-  blockchain: string
+  userId: string
 ): Promise<{ walletId: string; address: string }> {
   try {
     // Try to get existing wallet
-    return await getGatewayEOAWalletId(userId, blockchain);
-  } catch (error) {
+    return await getGatewayEOAWalletId(userId);
+  } catch {
     // Wallet doesn't exist, create it using the user's existing wallet set
     console.log(`Creating Gateway EOA wallet for user ${userId}`);
     
@@ -162,6 +179,6 @@ export async function getOrCreateGatewayEOAWallet(
     await storeGatewayEOAWalletForUser(userId, scaWallet.wallet_set_id);
     
     // Now get the newly created wallet
-    return await getGatewayEOAWalletId(userId, blockchain);
+    return await getGatewayEOAWalletId(userId);
   }
 }

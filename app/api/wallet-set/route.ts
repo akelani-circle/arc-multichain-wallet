@@ -16,12 +16,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { circleDeveloperSdk } from "@/lib/circle/sdk";
+import { idempotencyKeyFor, withIdempotentRetry } from "@/lib/circle/idempotency";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-export async function POST(req: NextRequest) {
+export async function POST() {
   try {
     const supabase = await createClient();
     const {
@@ -46,10 +47,14 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Create wallet set
-    const walletSetResponse = await circleDeveloperSdk.createWalletSet({
-      name: `User ${user.id.substring(0, 8)} - Wallet Set`,
-    });
+    // Create wallet set. Fixed idempotency keys per user: a concurrent or repeated request
+    // gets the same wallet set and wallets back instead of creating more.
+    const walletSetResponse = await withIdempotentRetry(() =>
+      circleDeveloperSdk.createWalletSet({
+        name: `User ${user.id.substring(0, 8)} - Wallet Set`,
+        idempotencyKey: idempotencyKeyFor(user.id, "wallet_set"),
+      })
+    );
 
     if (!walletSetResponse.data?.walletSet) {
       throw new Error("Failed to create wallet set");
@@ -59,18 +64,23 @@ export async function POST(req: NextRequest) {
 
     // Create multichain SCA wallet on ALL supported chains
     // This ensures Circle SDK recognizes the wallet on each chain for transactions
-    const walletsResponse = await circleDeveloperSdk.createWallets({
-      accountType: "SCA",
-      blockchains: ["ARC-TESTNET", "BASE-SEPOLIA", "AVAX-FUJI"], // Create on all chains
-      count: 1,
-      walletSetId,
-    });
+    const walletsResponse = await withIdempotentRetry(() =>
+      circleDeveloperSdk.createWallets({
+        accountType: "SCA",
+        blockchains: ["ARC-TESTNET", "BASE-SEPOLIA", "AVAX-FUJI"], // Create on all chains
+        count: 1,
+        walletSetId,
+        idempotencyKey: idempotencyKeyFor(user.id, "sca"),
+      })
+    );
 
     if (!walletsResponse.data?.wallets || walletsResponse.data.wallets.length === 0) {
       throw new Error("Failed to create wallet");
     }
 
-    // Store ONE multichain wallet in database
+    // Store ONE multichain wallet in database. Circle returns one wallet per chain, all with
+    // the same address; transactions pick the chain by address + blockchain, so the stored
+    // ID (the first chain's) is never used to choose where a transaction runs.
     const wallet = walletsResponse.data.wallets[0];
     const walletRecords = [{
       user_id: user.id,
@@ -106,7 +116,7 @@ export async function POST(req: NextRequest) {
       walletSetId,
       wallets: walletRecords,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Wallet set creation failed:", error);
     return NextResponse.json(
       { error: "Failed to create wallet set" },

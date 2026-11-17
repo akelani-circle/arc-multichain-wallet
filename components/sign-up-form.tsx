@@ -43,6 +43,7 @@ export function SignUpForm({
   const [repeatPassword, setRepeatPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [awaitingConfirmation, setAwaitingConfirmation] = useState(false);
   const router = useRouter();
 
   const handleSignUp = async (e: React.FormEvent) => {
@@ -62,10 +63,19 @@ export function SignUpForm({
         email,
         password,
         options: {
-          emailRedirectTo: `${window.location.origin}/dashboard`,
+          // The confirmation link signs the user in through /auth/confirm.
+          emailRedirectTo: `${window.location.origin}/auth/confirm?next=/dashboard`,
         },
       });
       if (error) throw error;
+
+      // With email confirmation on (the hosted Supabase default) there is no session until
+      // the link is followed, so the wallet routes would refuse. The dashboard offers to
+      // create the wallet after the first sign-in.
+      if (!data.session) {
+        setAwaitingConfirmation(true);
+        return;
+      }
 
       // If user is created, initialize wallets in the background
       if (data.user) {
@@ -92,6 +102,25 @@ export function SignUpForm({
       setIsLoading(false);
     }
   };
+
+  if (awaitingConfirmation) {
+    return (
+      <div className={cn("flex flex-col gap-6", className)} {...props}>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-2xl">Check your email</CardTitle>
+            <CardDescription>Confirm your address to finish signing up</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              We sent a confirmation link to {email}. Open it in this browser to sign in; your
+              Circle wallet can then be created from the dashboard.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className={cn("flex flex-col gap-6", className)} {...props}>

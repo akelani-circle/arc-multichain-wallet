@@ -106,8 +106,8 @@ export async function POST(req: NextRequest) {
 
           gatewayTotal = gatewayBalances.reduce((sum, b) => sum + b.balance, 0);
           console.log(`Total Gateway balance for ${address}: ${gatewayTotal} USDC`);
-        } catch (error: any) {
-          console.error(`Error fetching Gateway balance for ${address}:`, error.message);
+        } catch (error: unknown) {
+          console.error(`Error fetching Gateway balance for ${address}:`, error);
           console.log(`Will fetch on-chain balances only`);
         }
 
@@ -143,11 +143,11 @@ export async function POST(req: NextRequest) {
           walletTotal,
           totalBalance: gatewayTotal + walletTotal,
         };
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error(`Error fetching balance for ${address}:`, error);
         return {
           address,
-          error: error.message,
+          error: "Failed to fetch balance",
           totalBalance: 0,
         };
       }
@@ -165,10 +165,10 @@ export async function POST(req: NextRequest) {
       totalUnified,
       balances,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error fetching balances:", error);
     return NextResponse.json(
-      { error: error.message || "Internal server error" },
+      { error: "Failed to fetch balances" },
       { status: 500 }
     );
   }

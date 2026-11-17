@@ -23,7 +23,7 @@ import { SCA_WALLET, USER, signedIn, signedOut, withWallet, type UserClient } fr
 
 const user = vi.hoisted(() => ({ from: vi.fn(), auth: { getUser: vi.fn() } }));
 const admin = vi.hoisted(() => ({ from: vi.fn() }));
-const gateway = vi.hoisted(() => ({ initiateDepositFromCustodialWallet: vi.fn() }));
+const gateway = vi.hoisted(() => ({ initiateDepositFromCustodialWallet: vi.fn(), getUsdcBalance: vi.fn() }));
 const eoa = vi.hoisted(() => ({ getOrCreateGatewayEOAWallet: vi.fn() }));
 
 vi.mock("@/lib/supabase/server", () => ({ createClient: async () => user }));
@@ -50,6 +50,8 @@ beforeEach(() => {
   eoa.getOrCreateGatewayEOAWallet.mockReset();
   eoa.getOrCreateGatewayEOAWallet.mockResolvedValue({ address: "0x" + "e0".repeat(20), walletId: "cw-eoa" });
   gateway.initiateDepositFromCustodialWallet.mockResolvedValue("0xdeposittx");
+  gateway.getUsdcBalance.mockReset();
+  gateway.getUsdcBalance.mockResolvedValue(BigInt(10_000_000));
 });
 
 describe("POST /api/gateway/deposit", () => {
@@ -91,8 +93,10 @@ describe("POST /api/gateway/deposit", () => {
     const res = await post({ chain: "baseSepolia", amount: "0.29" });
 
     expect(res.status).toBe(200);
+    // By address + chain: the stored wallet ID is the Arc wallet's, so using it ran every
+    // deposit on Arc whatever chain was picked.
     expect(gateway.initiateDepositFromCustodialWallet).toHaveBeenCalledWith(
-      SCA_WALLET.circle_wallet_id,
+      SCA_WALLET.address,
       "baseSepolia",
       BigInt(290_000), // Math.floor(0.29 * 1e6) is 289999
       "0x" + "e0".repeat(20)
@@ -104,6 +108,19 @@ describe("POST /api/gateway/deposit", () => {
       amount: 0.29,
       status: "success",
     });
+  });
+
+  it("refuses when the wallet holds less USDC than the amount, before any transaction", async () => {
+    signedIn(user as UserClient, withWallet());
+    gateway.getUsdcBalance.mockResolvedValue(BigInt(500_000));
+
+    const res = await post({ chain: "avalancheFuji", amount: "1" });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/Insufficient USDC balance.*0\.5 USDC/);
+    expect(gateway.getUsdcBalance).toHaveBeenCalledWith(SCA_WALLET.address, "avalancheFuji");
+    expect(eoa.getOrCreateGatewayEOAWallet).not.toHaveBeenCalled();
+    expect(gateway.initiateDepositFromCustodialWallet).not.toHaveBeenCalled();
   });
 
   it("records history with the secret-key client, never the user's", async () => {

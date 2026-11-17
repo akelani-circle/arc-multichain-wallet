@@ -28,11 +28,20 @@ import {
   CardTitle,
   CardDescription,
 } from "@/components/ui/card";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { createClient } from "@/lib/supabase/client";
-import { ChainBalance } from "@/lib/chain-config";
+import {
+  CHAIN_NAMES,
+  NATIVE_TOKENS,
+  SUPPORTED_CHAINS,
+  type ChainBalance,
+  type GatewayChainBalance,
+  type SupportedChain,
+} from "@/lib/chain-config";
+import { parseUsdcAmount } from "@/lib/usdc";
 import { AlertCircleIcon } from "lucide-react";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -48,27 +57,95 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { CHAIN_NAMES } from "@/lib/chain-config";
 
-type SupportedChain = "arcTestnet" | "baseSepolia" | "avalancheFuji";
+interface AddressBalances {
+  address: string;
+  gatewayBalances?: GatewayChainBalance[];
+  chainBalances?: ChainBalance[];
+  gatewayTotal?: number;
+  walletTotal?: number;
+  totalBalance: number;
+}
+
+interface BalancesResponse {
+  totalUnified: number;
+  balances: AddressBalances[];
+}
+
+interface TransferQuote {
+  fee: string;
+  available: string;
+  required: string;
+  sufficient: boolean;
+}
+
+const formatUsdc = (value: number) =>
+  value.toLocaleString("en-US", { minimumFractionDigits: 6, maximumFractionDigits: 6 });
+
+// USDC amounts from the API are decimals; compare them in exact base units.
+const toAtomic = (value: number) => BigInt(Math.round(value * 1_000_000));
+
+const subscribeToNothing = () => () => {};
+
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+  return debounced;
+}
+
+function sumByChain(entries: ChainBalance[]): Record<string, number> {
+  return entries.reduce<Record<string, number>>((acc, { chain, balance }) => {
+    acc[chain] = (acc[chain] ?? 0) + balance;
+    return acc;
+  }, {});
+}
+
+function ChainSelect({
+  id,
+  value,
+  onChange,
+  disabled,
+}: {
+  id: string;
+  value: SupportedChain;
+  onChange: (chain: SupportedChain) => void;
+  disabled: boolean;
+}) {
+  return (
+    <Select value={value} onValueChange={(v) => onChange(v as SupportedChain)} disabled={disabled}>
+      <SelectTrigger id={id} className="w-full">
+        <SelectValue placeholder="Select chain" />
+      </SelectTrigger>
+      <SelectContent>
+        {SUPPORTED_CHAINS.map((chain) => (
+          <SelectItem key={chain.value} value={chain.value}>
+            {chain.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
 
 export function WalletDashboard() {
-  const [isMounted, setIsMounted] = useState(false);
+  // false during server rendering and hydration, true afterwards
+  const isMounted = useSyncExternalStore(subscribeToNothing, () => true, () => false);
+  const queryClient = useQueryClient();
 
   const [hasCircleWallet, setHasCircleWallet] = useState(false);
   const [circleWalletAddresses, setCircleWalletAddresses] = useState<string[]>([]);
   const [isCheckingCircleWallet, setIsCheckingCircleWallet] = useState(true);
 
   useEffect(() => {
-    setIsMounted(true);
-  }, []);
-
-  useEffect(() => {
     const initializeWallets = async () => {
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
-        // Initialize EOA wallets for Gateway signing
+        // Initialize EOA wallets for Gateway signing. Safe to repeat (the dev-mode double
+        // effect calls it twice): the server returns the existing wallet.
         try {
           await fetch("/api/gateway/init-eoa-wallets", { method: "POST" });
         } catch (error) {
@@ -117,123 +194,108 @@ export function WalletDashboard() {
       toast.success("Address Copied", {
         description: "Wallet address copied to clipboard",
       });
-    } catch (err) {
+    } catch {
       toast.error("Copy Failed", {
         description: "Failed to copy address to clipboard",
       });
     }
   };
 
-  // Helper function to validate amount for deposit (positive number only)
-  const isValidDepositAmount = (amount: string): boolean => {
-    if (!amount) return false;
-    const num = parseFloat(amount);
-    return !isNaN(num) && num > 0;
-  };
-
-  // Helper function to validate amount for transfer (positive number and sufficient gateway balance)
-  const isValidTransferAmount = (amount: string): boolean => {
-    if (!amount) return false;
-    const num = parseFloat(amount);
-    return !isNaN(num) && num > 0 && num <= gatewayBalance;
-  };
-  const [totalBalance, setTotalBalance] = useState<number | null>(null);
-  const [gatewayBalance, setGatewayBalance] = useState<number>(0);
-  const [walletBalance, setWalletBalance] = useState<number>(0);
-  const [chainBalances, setChainBalances] = useState<ChainBalance[]>([]);
-  const [gatewayChainBalances, setGatewayChainBalances] = useState<ChainBalance[]>([]);
-  const [balanceLoading, setBalanceLoading] = useState(true);
-
-  // Deposit state
-  const [depositAmount, setDepositAmount] = useState("");
-  const [depositLoading, setDepositLoading] = useState(false);
-
-  // Transfer state
-  const [sourceChain] = useState<SupportedChain>("arcTestnet");
-  const [destinationChain, setDestinationChain] = useState<SupportedChain>("baseSepolia");
-  const [transferAmount, setTransferAmount] = useState("");
-  const [recipientAddress, setRecipientAddress] = useState("");
-  const [transferLoading, setTransferLoading] = useState(false);
-
-  // Refetchable balance function
-  const fetchBalances = async (showLoadingState = true) => {
-    // Wait until the initial wallet check is complete
-    if (isCheckingCircleWallet) return;
-
-    if (allWalletAddresses.length === 0) {
-      setBalanceLoading(false);
-      setTotalBalance(null);
-      setGatewayBalance(0);
-      setWalletBalance(0);
-      setChainBalances([]);
-      return;
-    }
-
-    if (showLoadingState) {
-      setBalanceLoading(true);
-    }
-
-    try {
+  // Balances, refreshed every 30 seconds
+  const balancesQuery = useQuery({
+    queryKey: ["balances", allWalletAddresses],
+    enabled: !isCheckingCircleWallet && allWalletAddresses.length > 0,
+    refetchInterval: 30_000,
+    queryFn: async (): Promise<BalancesResponse> => {
       const response = await fetch("/api/gateway/balance", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ addresses: allWalletAddresses }),
       });
-
       if (!response.ok) {
         throw new Error(`Error: ${response.statusText}`);
       }
+      return response.json();
+    },
+  });
 
-      const data = await response.json();
-
-      let totalGateway = 0;
-      let totalWallet = 0;
-      const allGatewayBalances: ChainBalance[] = [];
-      const allChainBalances: ChainBalance[] = [];
-
-      data.balances.forEach((b: any) => {
-        totalGateway += b.gatewayTotal || 0;
-        totalWallet += b.walletTotal || 0;
-
-        if (b.gatewayBalances) {
-          allGatewayBalances.push(...b.gatewayBalances);
-        }
-        if (b.chainBalances) {
-          allChainBalances.push(...b.chainBalances);
-        }
-      });
-
-      setTotalBalance(data.totalUnified);
-      setGatewayBalance(totalGateway);
-      setWalletBalance(totalWallet);
-      setChainBalances(allChainBalances);
-      setGatewayChainBalances(allGatewayBalances);
-    } catch (err: any) {
+  useEffect(() => {
+    if (balancesQuery.error) {
       toast.error("Balance Update Failed", {
-        description: `Failed to fetch balances: ${err.message}`,
+        description: `Failed to fetch balances: ${balancesQuery.error.message}`,
       });
-    } finally {
-      if (showLoadingState) {
-        setBalanceLoading(false);
-      }
     }
-  };
+  }, [balancesQuery.error]);
 
-  // Fetch balances whenever the unified list of addresses changes
-  useEffect(() => {
-    fetchBalances();
-  }, [allWalletAddresses, isCheckingCircleWallet]);
+  const balances = useMemo(() => {
+    const entries = balancesQuery.data?.balances ?? [];
+    const gateway = entries.flatMap((b) => b.gatewayBalances ?? []);
+    const wallet = entries.flatMap((b) => b.chainBalances ?? []);
+    return {
+      total: balancesQuery.data ? balancesQuery.data.totalUnified : null,
+      gatewayTotal: entries.reduce((sum, b) => sum + (b.gatewayTotal || 0), 0),
+      walletTotal: entries.reduce((sum, b) => sum + (b.walletTotal || 0), 0),
+      gatewayBalances: gateway,
+      chainBalances: wallet,
+      gatewayByChain: sumByChain(gateway),
+      walletByChain: sumByChain(wallet),
+    };
+  }, [balancesQuery.data]);
 
-  // Auto-refresh balances every 30 seconds
-  useEffect(() => {
-    if (allWalletAddresses.length === 0) return;
+  const balanceLoading =
+    isCheckingCircleWallet || (allWalletAddresses.length > 0 && balancesQuery.isPending);
 
-    const interval = setInterval(() => {
-      fetchBalances(false); // Don't show loading state for auto-refresh
-    }, 30000); // 30 seconds
+  const refreshAfterTransaction = () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["balances"] }),
+      queryClient.invalidateQueries({ queryKey: ["transactions"] }),
+    ]);
 
-    return () => clearInterval(interval);
-  }, [allWalletAddresses]);
+  // Deposit state
+  const [depositChain, setDepositChain] = useState<SupportedChain>("arcTestnet");
+  const [depositAmount, setDepositAmount] = useState("");
+  const [depositLoading, setDepositLoading] = useState(false);
+
+  // Transfer state
+  const [sourceChain, setSourceChain] = useState<SupportedChain>("arcTestnet");
+  const [destinationChain, setDestinationChain] = useState<SupportedChain>("baseSepolia");
+  const [transferAmount, setTransferAmount] = useState("");
+  const [recipientAddress, setRecipientAddress] = useState("");
+  const [transferLoading, setTransferLoading] = useState(false);
+
+  const depositAtomic = parseUsdcAmount(depositAmount)?.atomic ?? null;
+  const depositWalletBalance = balances.walletByChain[depositChain] ?? 0;
+  const depositExceedsBalance =
+    depositAtomic !== null && depositAtomic > toAtomic(depositWalletBalance);
+
+  // Gateway takes its fee from the source chain's balance on top of the amount, so the
+  // dashboard asks the server for the fee before allowing a transfer.
+  const debouncedTransferAmount = useDebouncedValue(transferAmount, 400);
+  const quoteAmount = parseUsdcAmount(debouncedTransferAmount) ? debouncedTransferAmount : null;
+  const quoteQuery = useQuery({
+    queryKey: ["transfer-quote", sourceChain, destinationChain, quoteAmount],
+    enabled: hasCircleWallet && quoteAmount !== null,
+    staleTime: 15_000,
+    retry: false,
+    queryFn: async (): Promise<TransferQuote> => {
+      const response = await fetch("/api/gateway/fee", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceChain, destinationChain, amount: quoteAmount }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not estimate the fee");
+      return data;
+    },
+  });
+  const transferAtomic = parseUsdcAmount(transferAmount)?.atomic ?? null;
+  const sourceGatewayBalance = balances.gatewayByChain[sourceChain] ?? 0;
+  const quote = quoteAmount === transferAmount ? quoteQuery.data : undefined;
+  const transferFeeAtomic = quote ? parseUsdcAmount(quote.fee)?.atomic ?? BigInt(0) : BigInt(0);
+  const transferExceedsBalance =
+    transferAtomic !== null &&
+    transferAtomic + transferFeeAtomic > toAtomic(sourceGatewayBalance);
+  const quotePending = transferAtomic !== null && !quote && !quoteQuery.isError;
 
   const handleDeposit = async () => {
     if (!depositAmount) {
@@ -243,38 +305,27 @@ export function WalletDashboard() {
       return;
     }
     if (!hasCircleWallet) {
-      toast.error("Missing Credentials", {
-        description: "Please provide a private key for your connected wallet.",
+      toast.error("No Circle Wallet", {
+        description: "Create a Circle wallet first.",
       });
       return;
     }
 
     setDepositLoading(true);
-    
-    // Show initial progress toast
-    const progressToast = toast.loading("Initiating Deposit...", {
-      description: "Approving USDC and preparing transaction",
+
+    // One toast for the whole deposit: it is updated, then replaced by the result
+    const progressToast = toast.loading("Processing Deposit...", {
+      description: `Approving and depositing USDC on ${CHAIN_NAMES[depositChain]}`,
     });
-    
+
     try {
-      const payload: any = {
-        chain: "arcTestnet",
-        amount: depositAmount,
-      };
-
-      // Update progress for API call
-      toast.loading("Processing Deposit...", {
-        id: progressToast,
-        description: "Sending transaction to the network",
-      });
-
       const response = await fetch("/api/gateway/deposit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ chain: depositChain, amount: depositAmount }),
       });
       if (!response.ok) {
-        const error = await response.json();
+        const error = await response.json().catch(() => ({}));
         throw new Error(error.error || "Deposit failed");
       }
       const data = await response.json();
@@ -285,12 +336,13 @@ export function WalletDashboard() {
       });
 
       setDepositAmount("");
-      
-      // Instantly refresh balance
-      await fetchBalances(false);
-    } catch (err: any) {
+
+      // Instantly refresh balance and history
+      await refreshAfterTransaction();
+    } catch (err: unknown) {
       toast.error("Deposit Failed", {
-        description: err.message || "An error occurred during deposit",
+        id: progressToast,
+        description: err instanceof Error ? err.message : "An error occurred during deposit",
       });
     } finally {
       setDepositLoading(false);
@@ -305,8 +357,8 @@ export function WalletDashboard() {
       return;
     }
     if (!hasCircleWallet) {
-      toast.error("Missing Credentials", {
-        description: "Please provide a private key for your connected wallet.",
+      toast.error("No Circle Wallet", {
+        description: "Create a Circle wallet first.",
       });
       return;
     }
@@ -314,55 +366,34 @@ export function WalletDashboard() {
     // Cross-chain transfers will go through Gateway's burn/mint process
 
     setTransferLoading(true);
-    
-    // Show initial progress toast
-    const progressToast = toast.loading("Initiating Transfer...", {
-      description: "Creating burn intent and submitting for attestation",
+
+    const progressToast = toast.loading("Processing Transfer...", {
+      description: `Burning on ${CHAIN_NAMES[sourceChain]} and minting USDC on ${CHAIN_NAMES[destinationChain]}`,
     });
-    
+
     try {
-      const payload: any = {
-        sourceChain,
-        destinationChain,
-        amount: transferAmount,
-        recipientAddress: recipientAddress || undefined,
-      };
-
-      // Update progress for API call
-      toast.loading("Processing Transfer...", {
-        id: progressToast,
-        description: "Minting USDC on destination chain",
-      });
-
       const response = await fetch("/api/gateway/transfer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          sourceChain,
+          destinationChain,
+          amount: transferAmount,
+          recipientAddress: recipientAddress || undefined,
+        }),
       });
       if (!response.ok) {
-        const error = await response.json();
-        const errorMessage = error.error || "Transfer failed";
+        const error = await response.json().catch(() => ({}));
+        const errorMessage: string = error.error || "Transfer failed";
 
         // Handle insufficient gas error with wallet details
         if (errorMessage === "INSUFFICIENT_GAS" && error.walletAddress) {
-          const chainNames: Record<SupportedChain, string> = {
-            arcTestnet: "Arc Testnet",
-            avalancheFuji: "Avalanche Fuji",
-            baseSepolia: "Base Sepolia",
-          };
-          const nativeTokens: Record<SupportedChain, string> = {
-            arcTestnet: "ARC",
-            avalancheFuji: "AVAX",
-            baseSepolia: "ETH",
-          };
-          const chainName = chainNames[destinationChain];
-          const nativeToken = nativeTokens[destinationChain];
-          
-          // Dismiss the loading toast
-          toast.dismiss(progressToast);
-          
+          const chainName = CHAIN_NAMES[destinationChain];
+          const nativeToken = NATIVE_TOKENS[destinationChain];
+
           // Show detailed error with copy button for wallet address
           toast.error("Insufficient Gas", {
+            id: progressToast,
             description: (
               <div className="space-y-2">
                 <p>Your EOA wallet needs {nativeToken} on {chainName} to execute the mint.</p>
@@ -384,57 +415,26 @@ export function WalletDashboard() {
           });
           return; // Exit early, don't throw
         }
-        
-        if (errorMessage.includes("insufficient funds for transfer") ||
-          errorMessage.includes("exceeds the balance of the account")) {
-          const chainNames: Record<SupportedChain, string> = {
-            arcTestnet: "Arc Testnet",
-            avalancheFuji: "Avalanche Fuji",
-            baseSepolia: "Base Sepolia",
-          };
-          const nativeTokens: Record<SupportedChain, string> = {
-            arcTestnet: "ARC",
-            avalancheFuji: "AVAX",
-            baseSepolia: "ETH",
-          };
-          const chainName = chainNames[destinationChain];
-          const nativeToken = nativeTokens[destinationChain];
-          throw new Error(
-            `Insufficient gas funds: You need ${nativeToken} on ${chainName} to pay for the minting transaction.`
-          );
-        } else if (errorMessage.includes("Insufficient balance") || errorMessage.includes("insufficient balance")) {
-          throw new Error("Insufficient Gateway balance: You don't have enough USDC in your Gateway balance for this transfer.");
-        } else if (errorMessage.includes("Invalid address") || errorMessage.includes("invalid recipient")) {
-          throw new Error("Invalid address: Please check the recipient address and try again.");
-        } else if (errorMessage.includes("Gateway API error")) {
-          const apiErrorMatch = errorMessage.match(/Gateway API error: \d+ - (.+)/);
-          if (apiErrorMatch) {
-            throw new Error(`Transfer failed: ${apiErrorMatch[1]}`);
-          }
-          throw new Error(errorMessage);
-        } else {
-          throw new Error(errorMessage);
-        }
+
+        throw new Error(errorMessage);
       }
       const data = await response.json();
 
-      const successMessage = data.isSameChain 
-        ? `Withdrawal Transaction Hash: ${data.withdrawTxHash}`
-        : `Mint Transaction Hash: ${data.mintTxHash}`;
-      
       toast.success("Transfer Successful", {
         id: progressToast,
-        description: successMessage,
+        description: `Mint Transaction Hash: ${data.mintTxHash}`,
       });
 
       setTransferAmount("");
       setRecipientAddress("");
-      
-      // Instantly refresh balance
-      await fetchBalances(false);
-    } catch (err: any) {
+
+      // Instantly refresh balance and history
+      await refreshAfterTransaction();
+    } catch (err: unknown) {
       toast.error("Transfer Failed", {
-        description: err?.message || "An unexpected error occurred. Please try again.",
+        id: progressToast,
+        description:
+          err instanceof Error ? err.message : "An unexpected error occurred. Please try again.",
       });
     } finally {
       setTransferLoading(false);
@@ -452,7 +452,7 @@ export function WalletDashboard() {
           <CardHeader>
             <CardTitle>Wallet Setup</CardTitle>
             <CardDescription>
-              Connect your wallet to begin.
+              Create your Circle wallet to begin.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -470,8 +470,7 @@ export function WalletDashboard() {
               <CardHeader>
                 <CardTitle>Wallet Setup</CardTitle>
                 <CardDescription>
-                  Manage your connected wallets.
-                  {!hasCircleWallet && " Provide a private key to sign transactions."}
+                  Your Circle wallet has the same address on every supported chain.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -491,10 +490,10 @@ export function WalletDashboard() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => fetchBalances()}
-                    disabled={balanceLoading}
+                    onClick={() => balancesQuery.refetch()}
+                    disabled={balanceLoading || balancesQuery.isFetching}
                   >
-                    <RefreshCw className={`h-4 w-4 ${balanceLoading ? 'animate-spin' : ''}`} />
+                    <RefreshCw className={`h-4 w-4 ${balancesQuery.isFetching ? 'animate-spin' : ''}`} />
                   </Button>
                 </div>
               </CardHeader>
@@ -505,11 +504,11 @@ export function WalletDashboard() {
                     <Skeleton className="h-10 w-full" />
                     <Skeleton className="h-24 w-full" />
                   </div>
-                ) : totalBalance !== null ? (
+                ) : balances.total !== null ? (
                   <div className="space-y-4">
                     <div>
                       <p className="text-sm text-muted-foreground flex items-center gap-1">
-                        Arc Gateway Balance
+                        Gateway Balance (unified)
                         <TooltipProvider>
                           <Tooltip>
                             <TooltipTrigger asChild>
@@ -522,44 +521,40 @@ export function WalletDashboard() {
                         </TooltipProvider>
                       </p>
                       <p className="text-2xl font-bold">
-                        {gatewayBalance.toLocaleString('en-US', { minimumFractionDigits: 6, maximumFractionDigits: 6 })} USDC
+                        {formatUsdc(balances.gatewayTotal)} USDC
                       </p>
-                      {gatewayChainBalances.filter(cb => cb.balance > 0).length > 0 && (
-                        <ul className="text-xs space-y-1 mt-1 text-muted-foreground">
-                          {gatewayChainBalances.filter(cb => cb.balance > 0).map((cb, idx) => (
-                            <li
-                              key={`gateway-${idx}-${cb.chain}-${cb.balance}`}
-                              className="flex justify-between items-center gap-2"
-                            >
-                              <span className="capitalize">
-                                {CHAIN_NAMES[cb.chain as keyof typeof CHAIN_NAMES] || cb.chain}
-                              </span>
-                              <span className="font-mono">
-                                {cb.balance.toFixed(6)}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
                     </div>
+                    {balances.gatewayBalances.some(gb => gb.balance > 0) && (
+                      <ul className="text-xs space-y-1 mt-[-8px] text-muted-foreground">
+                        {balances.gatewayBalances.filter(gb => gb.balance > 0).map((gb) => (
+                          <li
+                            key={`gateway-${gb.address}-${gb.domain}`}
+                            className="flex justify-between items-center gap-2"
+                          >
+                            <span>Deposited on {CHAIN_NAMES[gb.chain as SupportedChain] ?? gb.chain}</span>
+                            <span className="font-mono">{gb.balance.toFixed(6)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                     <Separator className="my-4" />
                     <div>
                       <p className="text-sm text-muted-foreground">
                         Wallet Balance
                       </p>
                       <p className="text-2xl font-bold">
-                        {walletBalance.toLocaleString('en-US', { minimumFractionDigits: 6, maximumFractionDigits: 6 })} USDC
+                        {formatUsdc(balances.walletTotal)} USDC
                       </p>
                     </div>
-                    {chainBalances.filter(cb => cb.balance > 0).length > 0 ? (
+                    {balances.chainBalances.filter(cb => cb.balance > 0).length > 0 ? (
                       <ul className="text-xs space-y-1 mt-[-8px] text-muted-foreground">
-                        {chainBalances.filter(cb => cb.balance > 0).map((cb, idx) => (
+                        {balances.chainBalances.filter(cb => cb.balance > 0).map((cb, idx) => (
                           <li
                             key={`wallet-${idx}-${cb.chain}-${cb.balance}`}
                             className="flex justify-between items-center gap-2"
                           >
-                            <span className="capitalize flex items-center gap-2">
-                              {cb.chain} 
+                            <span className="flex items-center gap-2">
+                              {CHAIN_NAMES[cb.chain as SupportedChain] ?? cb.chain}
                               <span className="text-[10px] text-muted-foreground">{formatAddressSuffix(cb.address)}</span>
                               <Button
                                 variant="ghost"
@@ -605,6 +600,15 @@ export function WalletDashboard() {
                 <TabsContent value="deposit" className="pt-6">
                   <div className="space-y-4">
                     <div className="space-y-2">
+                      <Label htmlFor="deposit-chain">From</Label>
+                      <ChainSelect
+                        id="deposit-chain"
+                        value={depositChain}
+                        onChange={setDepositChain}
+                        disabled={depositLoading}
+                      />
+                    </div>
+                    <div className="space-y-2">
                       <Label htmlFor="deposit-amount">Amount (USDC)</Label>
                       <Input
                         id="deposit-amount"
@@ -616,10 +620,16 @@ export function WalletDashboard() {
                         onChange={(e) => setDepositAmount(e.target.value)}
                         disabled={depositLoading}
                       />
+                      <p className="text-xs text-muted-foreground">
+                        Wallet balance on {CHAIN_NAMES[depositChain]}: {formatUsdc(depositWalletBalance)} USDC
+                        {depositExceedsBalance && (
+                          <span className="text-red-500"> (Insufficient balance)</span>
+                        )}
+                      </p>
                     </div>
                     <Button
                       onClick={handleDeposit}
-                      disabled={depositLoading || !hasCircleWallet || !isValidDepositAmount(depositAmount)}
+                      disabled={depositLoading || !hasCircleWallet || depositAtomic === null || depositExceedsBalance}
                       className="w-full"
                     >
                       {depositLoading ? "Processing..." : "Deposit"}
@@ -629,24 +639,25 @@ export function WalletDashboard() {
 
                 <TabsContent value="transfer" className="pt-6">
                   <div className="space-y-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="destination-chain">To</Label>
-                      <Select
-                        value={destinationChain}
-                        onValueChange={(value) =>
-                          setDestinationChain(value as SupportedChain)
-                        }
-                        disabled={transferLoading}
-                      >
-                        <SelectTrigger className="w-full">
-                          <SelectValue placeholder="Select destination chain" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="arcTestnet">Arc Testnet</SelectItem>
-                          <SelectItem value="baseSepolia">Base Sepolia</SelectItem>
-                          <SelectItem value="avalancheFuji">Avalanche Fuji</SelectItem>
-                        </SelectContent>
-                      </Select>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div className="space-y-2">
+                        <Label htmlFor="source-chain">From</Label>
+                        <ChainSelect
+                          id="source-chain"
+                          value={sourceChain}
+                          onChange={setSourceChain}
+                          disabled={transferLoading}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="destination-chain">To</Label>
+                        <ChainSelect
+                          id="destination-chain"
+                          value={destinationChain}
+                          onChange={setDestinationChain}
+                          disabled={transferLoading}
+                        />
+                      </div>
                     </div>
                     {sourceChain !== destinationChain && (
                       <div className="flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 dark:border-blue-800 dark:bg-blue-950">
@@ -660,9 +671,11 @@ export function WalletDashboard() {
                     )}
                     <Alert>
                       <AlertCircleIcon className="h-4 w-4" />
-                      <AlertTitle>Gas Fees Required</AlertTitle>
+                      <AlertTitle>Gas Fees</AlertTitle>
                       <AlertDescription>
-                        You need native tokens on the destination chain to pay for gas fees when minting.
+                        Minting to your own wallet needs no gas tokens: Circle Gas Station pays for your
+                        smart contract wallet. Sending to another address mints from your signer wallet,
+                        which needs {NATIVE_TOKENS[destinationChain]} on {CHAIN_NAMES[destinationChain]}.
                       </AlertDescription>
                     </Alert>
                     <div className="space-y-2">
@@ -677,14 +690,17 @@ export function WalletDashboard() {
                         onChange={(e) => setTransferAmount(e.target.value)}
                         disabled={transferLoading}
                       />
-                      {transferAmount && parseFloat(transferAmount) > 0 && (
-                        <p className="text-xs text-muted-foreground">
-                          Available: {gatewayBalance.toLocaleString('en-US', { minimumFractionDigits: 6, maximumFractionDigits: 6 })} USDC
-                          {parseFloat(transferAmount) > gatewayBalance && (
-                            <span className="text-red-500"> (Insufficient balance)</span>
-                          )}
-                        </p>
-                      )}
+                      <p className="text-xs text-muted-foreground">
+                        Gateway balance on {CHAIN_NAMES[sourceChain]}: {formatUsdc(sourceGatewayBalance)} USDC
+                        {quote && <> · Gateway fee: up to {quote.fee} USDC, taken on top of the amount</>}
+                        {transferAtomic !== null && quotePending && <> · Estimating fee…</>}
+                        {quoteQuery.isError && quoteAmount === transferAmount && (
+                          <> · Fee unavailable: {quoteQuery.error.message}</>
+                        )}
+                        {transferExceedsBalance && (
+                          <span className="text-red-500"> (Insufficient balance)</span>
+                        )}
+                      </p>
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="recipient-address">
@@ -693,7 +709,7 @@ export function WalletDashboard() {
                       <Input
                         id="recipient-address"
                         type="text"
-                        placeholder="Defaults to your connected wallet"
+                        placeholder="Defaults to your Circle wallet"
                         className="w-full"
                         value={recipientAddress}
                         onChange={(e) => setRecipientAddress(e.target.value)}
@@ -702,7 +718,13 @@ export function WalletDashboard() {
                     </div>
                     <Button
                       onClick={handleTransfer}
-                      disabled={transferLoading || !hasCircleWallet || !isValidTransferAmount(transferAmount)}
+                      disabled={
+                        transferLoading ||
+                        !hasCircleWallet ||
+                        transferAtomic === null ||
+                        quotePending ||
+                        transferExceedsBalance
+                      }
                       className="w-full"
                     >
                       {transferLoading ? "Processing..." : "Transfer"}
@@ -733,10 +755,10 @@ export function WalletDashboard() {
                 <div className="text-sm text-muted-foreground">
                   <p className="font-medium mb-2">Quick Steps:</p>
                   <ol className="list-decimal list-inside space-y-1">
-                    <li>Get your Circle Wallet address from the "Connected Wallets" section</li>
+                    <li>Copy your Circle Wallet address from the Wallet Setup card</li>
                     <li>Visit the Circle Faucet and enter your wallet address</li>
                     <li>Select the desired testnet and request USDC</li>
-                    <li>Wait for the transaction to confirm, then deposit to Gateway</li>
+                    <li>Wait for the transaction to confirm, then deposit to Gateway from that chain</li>
                   </ol>
                 </div>
               </div>

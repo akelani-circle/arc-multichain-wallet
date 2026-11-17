@@ -68,6 +68,10 @@ export function ConnectWallet({ onAccountsChange }: { onAccountsChange?: (accoun
       });
 
       window.location.reload();
+    } catch (error: unknown) {
+      toast.error("Wallet Creation Failed", {
+        description: error instanceof Error ? error.message : "Failed to create wallet.",
+      });
     } finally {
       setIsCreatingCircleWallet(false);
     }

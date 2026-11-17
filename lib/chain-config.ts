@@ -27,7 +27,8 @@ export const CHAIN_NAMES: Record<SupportedChain, string> = {
   baseSepolia: "Base Sepolia",
 };
 
-export const NATIVE_TOKENS: Record<string, string> = {
+// Gas tokens. Arc's is USDC itself.
+export const NATIVE_TOKENS: Record<SupportedChain, string> = {
   arcTestnet: "USDC",
   avalancheFuji: "AVAX",
   baseSepolia: "ETH",
@@ -43,4 +44,9 @@ export interface ChainBalance {
   chain: string;
   balance: number;
   address: string;
+}
+
+/** A Gateway balance on one chain, as returned by /api/gateway/balance. */
+export interface GatewayChainBalance extends ChainBalance {
+  domain: number;
 }
